@@ -5,7 +5,11 @@
 // resolution; the add-on computes each level's share of the light (Battlefront2Glare in tone_mapping.h).
 #include "Includes/PsychoSettings.hlsl"
 
+#if BF2_GLARE_PASS == 0
+Texture2D<float4> Source : register(t0); // The private scene; alpha is its share of light for the gamut expansion.
+#else
 Texture2D<float3> Source : register(t0);
+#endif
 Texture2D<float3> Coarser : register(t1);
 RWTexture2D<float4> Target : register(u0);
 SamplerState LinearSampler : register(s0);
@@ -15,15 +19,16 @@ cbuffer GlareControls : register(b0) { float4 Glare; };
 void main(uint3 id : SV_DispatchThreadID)
 {
 #if BF2_GLARE_PASS == 0
-   // The scene's graded light above the display's peak (Glare.x, as PQ in Glare.y), with its colour, averaged
-   // over 2x2 pixels.
+   // The scene's graded light above the display's peak (Glare.x, as PQ in Glare.y), with its colour (expanded
+   // by Glare.z, as the display shows it), averaged over 2x2 pixels.
    float3 excess = 0.0f;
    [unroll] for (uint i = 0; i < 4; ++i)
    {
-      float3 pq = Source.Load(int3(id.xy * 2 + uint2(i & 1, i >> 1), 0));
+      float4 scene = Source.Load(int3(id.xy * 2 + uint2(i & 1, i >> 1), 0));
+      float3 pq = scene.rgb;
       [branch] if (max(pq.r, max(pq.g, pq.b)) > Glare.y)
       {
-         float3 light = BF2PQDecode(min(pq, 1.0f));
+         float3 light = BF2ExpandGamut(BF2PQDecode(min(pq, 1.0f)), Glare.z * saturate(scene.a));
          excess += light * max(1.0f - Glare.x / dot(light, float3(0.2126f, 0.7152f, 0.0722f)), 0.0f);
       }
    }
