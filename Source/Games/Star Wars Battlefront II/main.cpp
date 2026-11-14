@@ -41,6 +41,7 @@
 
 #include "..\..\Core\core.hpp"
 #include "engine_patches.h"
+#include "engine_fixes.h"
 #include "dlss.h"
 #include "samplers.h"
 #include "tone_mapping.h"
@@ -633,10 +634,12 @@ class Battlefront2Game final : public Game
    Battlefront2SSR::NativeResolution ssr_resolution;
    Battlefront2SSR::NativeResolution ssr_velocity{"ScreenSpaceRaytraceUseVelocityVectorsForTemporal", 0x24B};
    Battlefront2DepthDither::State depth_dither;
+   Battlefront2EngineFixes::Fixes engine_fixes;
 
 public:
    ~Battlefront2Game() override
    {
+      engine_fixes.Restore();
       depth_dither.Update(false);
       ssr_resolution.Update(false);
       ssr_velocity.Update(false);
@@ -3433,6 +3436,7 @@ private:
    {
       Battlefront2Compare::Expire();
       if (!Battlefront2XeGTAO::enabled.load()) GetGameDeviceData(device_data).xegtao.Reset();
+      engine_fixes.Update();
       depth_dither.Update(Battlefront2DepthDither::enabled.load() && device_data.sr_type == SR::Type::DLSS);
       const auto ssr_settings = Battlefront2SSR::Snapshot();
       ssr_resolution.Update(ssr_settings.full_resolution);
