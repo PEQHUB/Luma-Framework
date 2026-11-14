@@ -5,15 +5,6 @@
 #include "Includes/ACES2/output_transform.hlsl"
 #elif BF2_GT7
 #include "Includes/GT7/gt7_tone_mapping.hlsl"
-// Linear BT.709 <-> BT.2020, both D65, derived from the primaries.
-static const float3x3 BF2_BT709_TO_BT2020 = float3x3(
-   0.6274038959f, 0.3292830384f, 0.0433130657f,
-   0.0690972894f, 0.9195403951f, 0.0113623156f,
-   0.0163914389f, 0.0880133079f, 0.8955952532f);
-static const float3x3 BF2_BT2020_TO_BT709 = float3x3(
-   1.6604910021f, -0.5876411388f, -0.0728498633f,
-   -0.1245504745f, 1.1328998971f, -0.0083494226f,
-   -0.0181507634f, -0.1005788980f, 1.1187296614f);
 #else
 // PsychoV (RenoDX psychov Test35).
 #include "Includes/PsychoV/tonemap/psychov/test35.hlsl"
@@ -99,7 +90,13 @@ float4 main(float4 position : SV_Position, float2 uv : TEXCOORD0) : SV_Target
    // game's own SDR output has its white at 1.0. Each tone mapper takes that
    // signal; scene/paper white scales its OUTPUT, not its input. Eye glare is
    // scene light and joins it before the fade.
-   color=BF2PQDecode(color)+Glare.SampleLevel(LinearSampler,uv,0);
+   color=BF2PQDecode(color);
+   // The scene's alpha is the share of the pixel's light from blaster bolts and
+   // sabers (Luma_SWBF2_PsychoScene.hlsl); in HDR with a BT.2020 target their
+   // colour is expanded toward BT.2020.
+   [branch] if(PSYCHO_HDR && Psycho[4].x!=0.0f && BF2_LIGHT_GAMUT_EXPANSION>0.0f)
+      color=BF2ExpandGamut(color,BF2_LIGHT_GAMUT_EXPANSION*saturate(Scene.SampleLevel(PointSampler,uv,0).a));
+   color+=Glare.SampleLevel(LinearSampler,uv,0);
    [branch] if(N[2].x!=1.0f) color=BF2PQDecode(BF2PQEncode(color)*N[2].x);
    float paper=PsychoPaperNits();
 #if BF2_GT7

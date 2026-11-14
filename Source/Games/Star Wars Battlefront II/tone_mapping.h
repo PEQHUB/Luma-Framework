@@ -42,7 +42,7 @@ namespace Battlefront2Psycho
       Shadows,
       Contrast,
       GlareStrength,
-      Unused9,
+      LightGamutExpansion,
       Unused10,
       Purity,
       Unused12,
@@ -198,6 +198,7 @@ namespace Battlefront2Psycho
       {SDRWhite, "PsychoSDRWhite", 100, 80, 300},
       {BloomStrength, "PostBloomStrength", 0, 0, 2},
       {GlareStrength, "PostGlareStrength", 1, 0, 4},
+      {LightGamutExpansion, "PostLightGamutExpansion", 1, 0, 1},
       {VignetteStrength, "PostVignetteStrength", 0, 0, 1},
       {SDRDither, "PostSDRDither", 1, 0, 1},
       {PrivatePrecision, "PostPrivatePrecision", 0, 0, 1},
@@ -279,6 +280,12 @@ namespace Battlefront2Psycho
    inline bool HDROutput(bool hdr_available, bool psycho_enabled)
    {
       return hdr_available && (!psycho_enabled || output_mode.load() != OutputMode::SDR);
+   }
+   // The gamut expansion of blaster bolts and sabers applies in HDR with a Luma tone mapper and a BT.2020 target (as
+   // the display shader decides).
+   inline float LightGamutExpansionAmount(const Settings& s)
+   {
+      return s.values[OutputHDR] != 0.f && s.values[HDRGamut] != 0.f && MapperOf(s) != Mapper::Native ? s.values[LightGamutExpansion] : 0.f;
    }
    // The output the shaders write. The linear transport (FP16 scRGB) carries HDR and SDR alike, so it follows Windows
    // HDR every frame. On an SDR display its white is 1.0 (80 nits) and Windows turns it into the display's 8-bit sRGB:
@@ -426,15 +433,17 @@ namespace Battlefront2Psycho
    inline void DrawScene(ID3D11DeviceContext* context, State& state,
       ID3D11VertexShader* vs, ID3D11PixelShader* ps, ID3D11ShaderResourceView* source, UINT uav_count,
       ID3D11ShaderResourceView* separated_grade = nullptr,
-      UINT source_width = 0, UINT source_height = 0, UINT crop_x = 0, UINT crop_y = 0, ID3D11RenderTargetView* target_override = nullptr)
+      UINT source_width = 0, UINT source_height = 0, UINT crop_x = 0, UINT crop_y = 0, ID3D11RenderTargetView* target_override = nullptr,
+      ID3D11ShaderResourceView* light_layer = nullptr)
    {
       DrawStateStack<DrawStateStackType::FullGraphics> saved;
       saved.Cache(context, uav_count);
       // FullGraphics does not save the GS/HS/DS stages, so they are restored by
-      // hand, as is the separated grade in slot 8.
-      com_ptr<ID3D11ShaderResourceView> previous_grade;
-      context->PSGetShaderResources(8, 1, &previous_grade);
-      context->PSSetShaderResources(8, 1, &separated_grade);
+      // hand, as are the separated grade and the light layer in slots 8 and 9.
+      com_ptr<ID3D11ShaderResourceView> previous_grade[2];
+      context->PSGetShaderResources(8, 2, &previous_grade[0]);
+      ID3D11ShaderResourceView* const grade_and_light[2] = {separated_grade, light_layer};
+      context->PSSetShaderResources(8, 2, grade_and_light);
       com_ptr<ID3D11GeometryShader> gs;
       com_ptr<ID3D11HullShader> hs;
       com_ptr<ID3D11DomainShader> ds;
@@ -466,8 +475,8 @@ namespace Battlefront2Psycho
       context->PSSetShader(ps, nullptr, 0);
       context->Draw(4, 0);
       saved.Restore(context);
-      ID3D11ShaderResourceView* restore_grade = previous_grade.get();
-      context->PSSetShaderResources(8, 1, &restore_grade);
+      ID3D11ShaderResourceView* const restore_grade[2] = {previous_grade[0].get(), previous_grade[1].get()};
+      context->PSSetShaderResources(8, 2, restore_grade);
       context->GSSetShader(gs.get(), nullptr, 0);
       context->HSSetShader(hs.get(), nullptr, 0);
       context->DSSetShader(ds.get(), nullptr, 0);
@@ -621,9 +630,9 @@ namespace Battlefront2Glare
       ID3D11Buffer* constants = state.constants.get();
       context->CSSetConstantBuffers(0, 1, &constants);
       context->CSSetSamplers(0, 1, &linear_sampler);
-      const auto pass = [&](ID3D11ComputeShader* shader, ID3D11ShaderResourceView* source, ID3D11ShaderResourceView* coarser, ID3D11UnorderedAccessView* target, UINT level, float x, float y)
+      const auto pass = [&](ID3D11ComputeShader* shader, ID3D11ShaderResourceView* source, ID3D11ShaderResourceView* coarser, ID3D11UnorderedAccessView* target, UINT level, float x, float y, float z = 0.f)
       {
-         const float control[4] = {x, y, 0.f, 0.f};
+         const float control[4] = {x, y, z, 0.f};
          context->UpdateSubresource(constants, 0, nullptr, control, 0, 0);
          ID3D11ShaderResourceView* const inputs[2] = {source, coarser};
          context->CSSetUnorderedAccessViews(0, 1, &target, nullptr);
@@ -633,7 +642,7 @@ namespace Battlefront2Glare
          ID3D11UnorderedAccessView* const none = nullptr;
          context->CSSetUnorderedAccessViews(0, 1, &none, nullptr);
       };
-      pass(passes[0], tone.srv.get(), nullptr, state.light_uav[0].get(), 0, peak, peak_pq);
+      pass(passes[0], tone.srv.get(), nullptr, state.light_uav[0].get(), 0, peak, peak_pq, P::LightGamutExpansionAmount(tone.uploaded));
       for (UINT i = 1; i < state.levels; ++i)
          pass(passes[1], state.light_srv[i - 1].get(), nullptr, state.light_uav[i].get(), i, 0.f, 0.f);
       for (UINT i = state.levels - 1; i-- > 0;)

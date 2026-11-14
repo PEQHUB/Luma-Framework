@@ -22,6 +22,11 @@ SamplerState IronsightsSampler : register(s4);
 #endif
 Texture2D<float3> NativeScene : register(t7); // Free of all native input slots.
 Texture3D<float4> SeparatedGrade : register(t8);
+#if !BF2_NATIVE_POST
+// Blaster bolts and saber blades (`laser_shaders` in dlss.h), drawn once more on their own
+// (Battlefront2PostDLSS::State::Replay); unbound without them.
+Texture2D<float3> LightLayer : register(t9);
+#endif
 SamplerState SceneSampler : register(s0);
 SamplerState GradeSampler : register(s1);
 SamplerState AuxiliarySampler : register(s2);
@@ -64,6 +69,16 @@ float4 main(float4 position : SV_Position, float4 unused : TEXCOORD0, float2 uv 
 #else
    color=Scene.SampleLevel(SceneSampler,uv,0);
 #endif
+#endif
+#if !BF2_NATIVE_POST
+   // The share of the pixel's light from the light layer, for the display's gamut expansion.
+#if BF2_PACK_DISTORTION
+   float3 layer=LightLayer.SampleLevel(SceneSampler,sceneUV,0);
+#else
+   float3 layer=LightLayer.SampleLevel(SceneSampler,lensUV,0);
+#endif
+   const float3 luminance=float3(0.2126f,0.7152f,0.0722f);
+   float lightShare=saturate(dot(layer,luminance)/max(dot(color,luminance),1e-6f));
 #endif
 #if BF2_PACK_IRONSIGHTS
    if (!PSYCHO_DOF_DISABLED) {
@@ -150,5 +165,9 @@ float4 main(float4 position : SV_Position, float4 unused : TEXCOORD0, float2 uv 
    }
    // Private FP16 retains graded BT.709 PQ. Reconstruct/fade this signal in
    // the final pass before decoding and applying Psycho once, ahead of UI.
+#if BF2_NATIVE_POST
    return float4(color,dot(color,float3(0.212671f,0.715160f,0.072169f)));
+#else
+   return float4(color,lightShare);
+#endif
 }

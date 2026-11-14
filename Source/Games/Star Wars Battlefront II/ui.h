@@ -540,6 +540,8 @@ namespace Battlefront2Psycho
          return "0% removes the game's grading; 100% restores it.";
       case GlareStrength:
          return "Glow of lights brighter than the display can show, as the eye would see them. 1.00 is physical.";
+      case LightGamutExpansion:
+         return "Expands the colour of blaster bolts and lightsabers from BT.709 toward BT.2020, keeping brightness and hue. 0 is the game's colour. HDR with DLSS only.";
       default:
          return nullptr;
       }
@@ -717,6 +719,7 @@ namespace Battlefront2Psycho
          {
             changed |= DrawControl(value, BloomStrength, "Bloom");
             changed |= DrawControl(value, GlareStrength, "Eye glare", mapper == Mapper::Native);
+            changed |= DrawControl(value, LightGamutExpansion, "Bolt and saber gamut", mapper == Mapper::Native || !output_hdr || value.values[HDRGamut] == 0.f || !state.used_dlss);
             changed |= DrawControl(value, Grain, "Film grain");
             changed |= DrawControl(value, VignetteStrength, "Vignette");
             changed |= DrawControl(value, MotionBlurEnabled, "Motion blur");
