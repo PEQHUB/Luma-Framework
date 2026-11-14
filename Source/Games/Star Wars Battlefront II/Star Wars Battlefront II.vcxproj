@@ -319,6 +319,7 @@
   <ItemGroup>
     <ClInclude Include="aces2_output.h" />
     <ClInclude Include="dlss.h" />
+    <ClInclude Include="engine_fixes.h" />
     <ClInclude Include="engine_patches.h" />
     <ClInclude Include="game_passes.h" />
     <ClInclude Include="samplers.h" />
