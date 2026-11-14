@@ -1,0 +1,3 @@
+// The menu font (fonts/OFL.txt): Roboto Condensed SemiBold, a Latin subset of RobotoCondensed[wght].ttf from
+// google/fonts commit 69d0549 (SHA-256 dace262a...) instanced at weight 600 with fontTools. See Battlefront2UI::MenuFont().
+101 RCDATA "fonts/RobotoCondensed-SemiBold.ttf"
