@@ -34,6 +34,7 @@ using GetDesc1Function = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain1* swapchain,
 using PresentFunction = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain* swapchain, UINT sync_interval, UINT flags);
 using Present1Function = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain1* swapchain, UINT sync_interval, UINT flags, const DXGI_PRESENT_PARAMETERS* parameters);
 using SetFullscreenStateFunction = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain* swapchain, BOOL fullscreen, IDXGIOutput* output);
+using GetFullscreenStateFunction = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain* swapchain, BOOL* fullscreen, IDXGIOutput** output);
 using ResizeBuffersFunction = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain* swapchain, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags);
 using ResizeBuffers1Function = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain3* swapchain, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags,
    const UINT* node_masks, IUnknown* const* present_queues);
@@ -49,6 +50,7 @@ GetDesc1Function original_get_desc1 = nullptr;
 PresentFunction original_present = nullptr;
 Present1Function original_present1 = nullptr;
 SetFullscreenStateFunction original_set_fullscreen_state = nullptr;
+GetFullscreenStateFunction original_get_fullscreen_state = nullptr;
 ResizeBuffersFunction original_resize_buffers = nullptr;
 ResizeBuffers1Function original_resize_buffers1 = nullptr;
 
@@ -58,6 +60,7 @@ thread_local uint32_t create_depth = 0;
 thread_local uint32_t swapchain_create_depth = 0;
 thread_local uint32_t present_depth = 0;
 thread_local uint32_t resize_depth = 0;
+thread_local uint32_t fullscreen_depth = 0;
 
 const std::array FACTORY_VERSIONS = {
    LUMA_INTERFACE_VERSION(IDXGIFactory),
@@ -92,6 +95,10 @@ struct GameDescs
 {
    std::mutex mutex;
    std::unordered_map<const void*, GameSwapchainDesc> by_swapchain; // By the swapchain's address, COM interfaces are single inheritance
+   // The state of the game's last "SetFullscreenState" that Core blocked, which the game reads back through
+   // "GetFullscreenState": a game that checks whether its fullscreen request took effect would otherwise see a window.
+   // Not covered: a swapchain created fullscreen (Core creates it windowed), and "GetDesc", which reports the real state.
+   std::unordered_map<const void*, BOOL> blocked_fullscreen;
 };
 
 // Leaked: hooked functions can still run while the process exits
@@ -121,6 +128,25 @@ void ForgetGameDesc(const void* swapchain)
    GameDescs& descs = GetGameDescs();
    std::scoped_lock lock(descs.mutex);
    descs.by_swapchain.erase(swapchain);
+   descs.blocked_fullscreen.erase(swapchain);
+}
+
+void SetBlockedFullscreen(const void* swapchain, std::optional<BOOL> fullscreen)
+{
+   GameDescs& descs = GetGameDescs();
+   std::scoped_lock lock(descs.mutex);
+   if (fullscreen)
+      descs.blocked_fullscreen[swapchain] = *fullscreen;
+   else
+      descs.blocked_fullscreen.erase(swapchain);
+}
+
+std::optional<BOOL> GetBlockedFullscreen(const void* swapchain)
+{
+   GameDescs& descs = GetGameDescs();
+   std::scoped_lock lock(descs.mutex);
+   const auto it = descs.blocked_fullscreen.find(swapchain);
+   return it != descs.blocked_fullscreen.end() ? std::optional(it->second) : std::nullopt;
 }
 
 // Resolves a game resize the way DXGI would against what the game asked for before (zero keeps the buffer count, unknown the format), and records it.
@@ -365,13 +391,40 @@ HRESULT STDMETHODCALLTYPE Present1(IDXGISwapChain1* swapchain, UINT sync_interva
 
 HRESULT STDMETHODCALLTYPE SetFullscreenState(IDXGISwapChain* swapchain, BOOL fullscreen, IDXGIOutput* output)
 {
-   if (!Scope::IsActive())
+   Utils::DepthGuard guard(fullscreen_depth);
+   if (guard.IsOutermost() && !Scope::IsActive())
    {
       Scope::Guard scope;
+      // Stored before the callback, which can move the window: the game may read the state back while handling that.
+      SetBlockedFullscreen(swapchain, fullscreen);
       if (Callbacks::PreSetFullscreenState(swapchain, fullscreen, output))
          return S_OK;
+      SetBlockedFullscreen(swapchain, std::nullopt);
    }
    return original_set_fullscreen_state(swapchain, fullscreen, output);
+}
+
+// Only the game's own calls see a blocked state (see "GameDescs::blocked_fullscreen"), not DXGI's while it presents,
+// resizes or creates a swapchain, nor Luma's.
+HRESULT STDMETHODCALLTYPE GetFullscreenState(IDXGISwapChain* swapchain, BOOL* fullscreen, IDXGIOutput** output)
+{
+   Utils::DepthGuard guard(fullscreen_depth);
+   if (guard.IsOutermost() && !Scope::IsActive() && present_depth == 0 && resize_depth == 0 && swapchain_create_depth == 0)
+   {
+      if (const std::optional<BOOL> blocked = GetBlockedFullscreen(swapchain))
+      {
+         if (fullscreen)
+            *fullscreen = *blocked;
+         if (output)
+         {
+            *output = nullptr;
+            if (*blocked)
+               swapchain->GetContainingOutput(output);
+         }
+         return S_OK;
+      }
+   }
+   return original_get_fullscreen_state(swapchain, fullscreen, output);
 }
 
 HRESULT STDMETHODCALLTYPE ResizeBuffers(IDXGISwapChain* swapchain, UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags)
@@ -441,6 +494,8 @@ void InstallDXGI(const D3D11::Functions& functions)
    {
       hooks.push_back(Hook{VtableTarget{Vtables::Interface::DXGISwapChain, LumaSlot_IDXGISwapChain_SetFullscreenState, "IDXGISwapChain::SetFullscreenState"},
          reinterpret_cast<void*>(&SetFullscreenState), reinterpret_cast<void**>(&original_set_fullscreen_state)});
+      hooks.push_back(Hook{VtableTarget{Vtables::Interface::DXGISwapChain, LumaSlot_IDXGISwapChain_GetFullscreenState, "IDXGISwapChain::GetFullscreenState"},
+         reinterpret_cast<void*>(&GetFullscreenState), reinterpret_cast<void**>(&original_get_fullscreen_state)});
    }
    if (functions.test(size_t(D3D11::Function::ResizeBuffers)))
    {
