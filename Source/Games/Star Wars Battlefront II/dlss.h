@@ -1225,6 +1225,11 @@ namespace Battlefront2PostDLSS
       com_ptr<ID3D11DepthStencilState> depth_copy;
       std::array<com_ptr<ID3D11DepthStencilState>, 8> stencil_copy;
       std::array<com_ptr<ID3D11DepthStencilState>, 256> stencil_clear;
+      // Blaster bolts and saber blades among the draws after the temporal pass (`laser_shaders`), drawn once more on
+      // their own (when `light_layer` is set) for the share of each pixel's light they make: Luma_SWBF2_PsychoScene.hlsl.
+      bool light_layer = false;
+      Image light;
+      uint64_t light_frame = ~uint64_t(0);
       // After DLSS the render-size inputs of the replayed passes are jittered samples under a settled picture.
       // `sample_offset` is where this frame's samples sit (from the render pixel centres, in render pixels, +y
       // down); `shares` holds each output pixel's shares of the four samples around it
@@ -1245,6 +1250,10 @@ namespace Battlefront2PostDLSS
       };
       std::vector<Upsampled> upsampled;
       uint32_t failure_logs = 0;
+      ID3D11ShaderResourceView* LightLayer() const
+      {
+         return valid && light_frame == frame ? light.srv.get() : nullptr;
+      }
       Image* Find(ID3D11Resource* native)
       {
          for (auto& image : images)
@@ -1271,6 +1280,8 @@ namespace Battlefront2PostDLSS
          images.clear();
          depths.clear();
          dof = {};
+         light = {};
+         light_frame = ~uint64_t(0);
          shares = {};
          shares_input = nullptr;
          shares_input_srv = nullptr;
@@ -1278,6 +1289,51 @@ namespace Battlefront2PostDLSS
          upsampled.clear();
          output_srv = output_mips = nullptr;
          width = height = 0;
+      }
+      // The late draws that are solid lasers: blaster bolts (B0AAD0DD, E91F8242) and saber blades (821DCF75, 074F3735),
+      // and the same four built without fog (6436AD41, BCA23C46, 9E076F39, FB8A3A57). Each computes its own shape and
+      // takes the effect's colour. The pass also draws sparks, flames, glows, holograms and hair: those keep their colour.
+      static constexpr std::array<uint32_t, 8> laser_shaders = {0xB0AAD0DD, 0xE91F8242, 0x821DCF75, 0x074F3735, 0x6436AD41, 0xBCA23C46, 0x9E076F39, 0xFB8A3A57};
+      // A light's depth test without its stencil test or writes, by depth function (0: no depth test).
+      std::array<com_ptr<ID3D11DepthStencilState>, 9> light_depth;
+      ID3D11DepthStencilState* LightDepthState(ID3D11Device* device, const D3D11_DEPTH_STENCIL_DESC& draw)
+      {
+         const size_t index = draw.DepthEnable && draw.DepthFunc < light_depth.size() ? size_t(draw.DepthFunc) : 0;
+         auto& state = light_depth[index];
+         if (!state)
+         {
+            D3D11_DEPTH_STENCIL_DESC d{};
+            d.DepthEnable = index != 0;
+            d.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+            d.DepthFunc = index != 0 ? draw.DepthFunc : D3D11_COMPARISON_ALWAYS;
+            device->CreateDepthStencilState(&d, &state);
+         }
+         return state.get();
+      }
+      // The light layer, cleared on its first draw of the frame.
+      ID3D11RenderTargetView* LightTarget(ID3D11Device* device, ID3D11DeviceContext* context)
+      {
+         if (!light.color)
+         {
+            D3D11_TEXTURE2D_DESC d{};
+            d.Width = width;
+            d.Height = height;
+            d.MipLevels = d.ArraySize = d.SampleDesc.Count = 1;
+            d.Format = DXGI_FORMAT_R11G11B10_FLOAT;
+            d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+            if (FAILED(device->CreateTexture2D(&d, nullptr, &light.color)) || FAILED(device->CreateRenderTargetView(light.color.get(), nullptr, &light.rtv)) || FAILED(device->CreateShaderResourceView(light.color.get(), nullptr, &light.srv)))
+            {
+               light = {};
+               return nullptr;
+            }
+         }
+         if (light_frame != frame)
+         {
+            const float clear[4]{};
+            context->ClearRenderTargetView(light.rtv.get(), clear);
+            light_frame = frame;
+         }
+         return light.rtv.get();
       }
       bool Begin(ID3D11Device* device, ID3D11Resource* native, ID3D11Texture2D* output,
          ID3D11ShaderResourceView* srv, uint64_t current_frame, float offset_x, float offset_y)
@@ -2113,6 +2169,16 @@ namespace Battlefront2PostDLSS
          draw();
          if (composite && scene_slot == 0)
             KeepInFocus(device, context, data, Find(source_resource.get())->srv.get(), original_inputs[9].get(), (dof_inputs & 2) ? dof.near_color[1].srv.get() : nullptr, destination->rtv.get());
+         // The solid lasers are drawn once more into the light layer, depth tested like the draw but without its stencil
+         // test or marks: the layer only needs where the light lands.
+         ID3D11RenderTargetView* light_rtv = light_layer && std::find(laser_shaders.begin(), laser_shaders.end(), uint32_t(hash)) != laser_shaders.end() ? LightTarget(device, context) : nullptr;
+         if (light_rtv)
+         {
+            context->OMSetDepthStencilState(LightDepthState(device, depth_desc), 0);
+            context->OMSetRenderTargets(1, &light_rtv, mirror_depth);
+            draw();
+            context->OMSetDepthStencilState(depth_state.get(), reference);
+         }
          ID3D11RenderTargetView* original_target = targets[0].get();
          ID3D11UnorderedAccessView* uavs[D3D11_1_UAV_SLOT_COUNT]{};
          for (UINT i = 1; i < data.uav_max_count; ++i)

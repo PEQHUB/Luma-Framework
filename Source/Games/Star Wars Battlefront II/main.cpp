@@ -1449,8 +1449,9 @@ private:
       original_draw(); // The game's own packed scene still feeds bloom and the UI glass.
       tone.native_packed = nullptr;
       tone.scene_frame = ~uint64_t(0);
+      ID3D11ShaderResourceView* light_layer = dlss ? game_data.dlss_post.LightLayer() : nullptr;
       Battlefront2Psycho::DrawScene(context, tone, vs.get(), ps.get(), input, data.uav_max_count, separated_grade,
-         width, height, crop_x, crop_y);
+         width, height, crop_x, crop_y, nullptr, light_layer);
       // For the tone mapper comparison, also draw the other scene path: Native uses the game's whole grade, the
       // other mappers Luma's.
       tone.compare_frame = ~uint64_t(0);
@@ -1463,7 +1464,7 @@ private:
          if (other && (!psycho_enabled || native_grade_valid))
          {
             Battlefront2Psycho::DrawScene(context, tone, vs.get(), other.get(), input, data.uav_max_count, other_grade,
-               width, height, crop_x, crop_y, tone.compare_rtv.get());
+               width, height, crop_x, crop_y, tone.compare_rtv.get(), light_layer);
             tone.compare_frame = frame;
          }
       }
@@ -3408,6 +3409,7 @@ private:
                         // watermark into its output at about 65000, which bloom turns into a light source. Begin
                         // points the replayed post passes at the private DLSS image and leaves u2 alone. NGX takes
                         // the jitter as minus the samples' offset from the pixel centres (+y down).
+                        game_device_data.dlss_post.light_layer = Battlefront2Psycho::LightGamutExpansionAmount(game_device_data.psycho.uploaded) > 0.f;
                         if (!game_device_data.dlss_post.Begin(native_device, output_texture.get(),
                                device_data.sr_output_color.get(), game_device_data.dlss_output_srv.get(), cb_luma_global_settings.FrameIndex,
                                -pending.jitter_x, -pending.jitter_y))
