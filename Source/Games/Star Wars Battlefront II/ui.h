@@ -537,9 +537,9 @@ namespace Battlefront2Psycho
       case DistortionStrength:
          return "Heat haze and ability distortion.";
       case LUTStrength:
-         return "0% removes the game's grading; 100% restores it.";
+         return "The game's colors: map tint, saturation and the whitening of bright lights. 0% shows the scene's own colors. 100% is the game's grading.";
       case GlareStrength:
-         return "Glow of lights brighter than the display can show, as the eye would see them. 1.00 is physical.";
+         return "Glow around very bright lights such as the sun, lightsabers and explosions, as the eye would see it. 1.00 is physical.";
       case LightGamutExpansion:
          return "Expands the colour of blaster bolts and lightsabers from BT.709 toward BT.2020, keeping brightness and hue. 0 is the game's colour. HDR with DLSS only.";
       default:
@@ -625,6 +625,7 @@ namespace Battlefront2Psycho
             }
             // Native always shows the game's full grade.
             changed |= DrawControl(value, LUTStrength, "Game color grading", mapper == Mapper::Native);
+            changed |= DrawControl(value, GlareStrength, "Eye glare", mapper == Mapper::Native);
             Battlefront2UI::Row("Output mode");
             int output = int(output_mode.load());
             ImGui::BeginDisabled(value.values[Enabled] == 0.f);
@@ -718,7 +719,6 @@ namespace Battlefront2Psycho
          if (Battlefront2UI::BeginRows("effects"))
          {
             changed |= DrawControl(value, BloomStrength, "Bloom");
-            changed |= DrawControl(value, GlareStrength, "Eye glare", mapper == Mapper::Native);
             changed |= DrawControl(value, LightGamutExpansion, "Bolt and saber gamut", mapper == Mapper::Native || !output_hdr || value.values[HDRGamut] == 0.f || !state.used_dlss);
             changed |= DrawControl(value, Grain, "Film grain");
             changed |= DrawControl(value, VignetteStrength, "Vignette");
@@ -790,7 +790,7 @@ namespace Battlefront2UI
          open(Category::Display, "display_section", "Display", [&]
             { P::DrawMenu(state, P::Page::Display); });
          if (P::MapperOf(P::Snapshot()) != P::Mapper::Native)
-            open(Category::Display, "tone_mapping_section", "Tone mapping", [&]
+            collapsed(Category::Display, "Tone mapping", "tone_mapping_section", [&]
                { P::DrawMenu(state, P::Page::ToneMapping); });
          collapsed(Category::Effects, "Effects", "effects_section", [&]
             {
@@ -800,8 +800,9 @@ namespace Battlefront2UI
             {
                P::DrawMenu(state, P::Page::Advanced);
                advanced(); });
-         collapsed(Category::Advanced, "Screenshots", "screenshots_section", [&]
-            { P::DrawMenu(state, P::Page::Screenshots); });
+         if (Battlefront2Compare::menu)
+            collapsed(Category::Advanced, "Screenshots", "screenshots_section", [&]
+               { P::DrawMenu(state, P::Page::Screenshots); });
          collapsed(Category::Advanced, "About", "about_section", about);
       }
       ImGui::EndChild();
@@ -930,8 +931,8 @@ namespace Battlefront2XeGTAO
    inline std::mutex settings_mutex;
    struct Settings
    {
-      bool enabled = true;             // XeGTAO or VB-GTAO replaces the game's AO
-      bool visibility_bitmask = false; // VB-GTAO
+      bool enabled = true;            // XeGTAO or VB-GTAO replaces the game's AO
+      bool visibility_bitmask = true; // VB-GTAO
       float radius = 1.f;
       unsigned quality = 1;
    };
@@ -959,8 +960,8 @@ namespace Battlefront2XeGTAO
    inline void Load()
    {
       Settings s;
-      Config::Get(NAME, "BattlefrontIIXeGTAOEnabled", s.enabled);
-      int method = s.enabled ? 1 : 0;
+      const bool saved = Config::Get(NAME, "BattlefrontIIXeGTAOEnabled", s.enabled);
+      int method = saved ? (s.enabled ? 1 : 0) : 3;
       Config::Get(NAME, "BattlefrontIIAOMethod", method);
       if (method >= 0 && method <= 3)
       {
@@ -983,9 +984,9 @@ namespace Battlefront2XeGTAO
       Battlefront2UI::Row("Ambient occlusion");
       bool changed = Battlefront2UI::Combo("##ao", &selected, "Native\0XeGTAO\0VB-GTAO\0");
       Battlefront2UI::Hint("Shading in corners and where objects meet. The game's own Ambient Occlusion setting turns it off.");
-      if (Battlefront2UI::ResetItem(selected == 1, false))
+      if (Battlefront2UI::ResetItem(selected == 2, false))
       {
-         selected = 1;
+         selected = 2;
          changed = true;
       }
       if (!changed) return;

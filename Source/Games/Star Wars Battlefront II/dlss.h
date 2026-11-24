@@ -1529,6 +1529,12 @@ namespace Battlefront2PostDLSS
          alias.native = target;
          alias.borrowed = true;
          auto* slot = Find(target);
+         // Entry 0 stays the DLSS output's; it just stops answering for the target.
+         if (slot == images.data())
+         {
+            slot->native = nullptr;
+            slot = nullptr;
+         }
          if (!slot) slot = FreeSlot();
          if (!slot) return false;
          *slot = std::move(alias);
@@ -2086,6 +2092,16 @@ namespace Battlefront2PostDLSS
          auto* ps = Shader(device, hash, composite ? scene_slot : -1, dof_inputs != 0, upsampled_mask);
          if (!ps || !Prepare(device)) return Fail("shader-or-resources");
          if (!destination) destination = Target(device, target.get());
+         // After a bypassed pass (Alias) two native targets can share one private image; a composite must not draw into
+         // the image it reads, so the target gets its own, starting from that content (the pass may blend onto it). The
+         // old entry keeps its slot this frame.
+         if (destination && composite && destination->color == Find(source_resource.get())->color)
+         {
+            ID3D11Texture2D* shared = destination->color.get();
+            destination->native = nullptr;
+            destination = Target(device, target.get());
+            if (destination) context->CopySubresourceRegion(destination->color.get(), 0, 0, 0, 0, shared, 0, nullptr);
+         }
          if (!destination) return Fail("scene-target-allocation");
          com_ptr<ID3D11DepthStencilState> depth_state;
          UINT reference = 0;

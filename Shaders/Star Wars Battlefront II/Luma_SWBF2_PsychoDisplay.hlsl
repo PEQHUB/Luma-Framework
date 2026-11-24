@@ -97,7 +97,8 @@ float4 main(float4 position : SV_Position, float2 uv : TEXCOORD0) : SV_Target
    [branch] if(PSYCHO_HDR && Psycho[4].x!=0.0f && BF2_LIGHT_GAMUT_EXPANSION>0.0f)
       color=BF2ExpandGamut(color,BF2_LIGHT_GAMUT_EXPANSION*saturate(Scene.SampleLevel(PointSampler,uv,0).a));
    color+=Glare.SampleLevel(LinearSampler,uv,0);
-   [branch] if(N[2].x!=1.0f) color=BF2PQDecode(BF2PQEncode(color)*N[2].x);
+   // The game fades in PQ. Mirrored for negative channels, which the gamut expansion and the glare can carry.
+   [branch] if(N[2].x!=1.0f) color=sign(color)*BF2PQDecode(BF2PQEncode(abs(color))*N[2].x);
    float paper=PsychoPaperNits();
 #if BF2_GT7
    // Polyphony's sample: linear Rec.2020 in and out, in frame-buffer units of

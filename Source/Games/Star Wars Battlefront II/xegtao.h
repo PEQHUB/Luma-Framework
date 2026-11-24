@@ -10,10 +10,10 @@
 namespace Battlefront2XeGTAO
 {
    using Microsoft::WRL::ComPtr;
-   inline std::atomic<bool> enabled{true};             // Replace the game's raw AO (XeGTAO or VB-GTAO)
-   inline std::atomic<bool> visibility_bitmask{false}; // VB-GTAO instead of XeGTAO (VISIBILITY_BITMASK)
+   inline std::atomic<bool> enabled{true};            // Replace the game's raw AO (XeGTAO or VB-GTAO)
+   inline std::atomic<bool> visibility_bitmask{true}; // VB-GTAO instead of XeGTAO (VISIBILITY_BITMASK)
    inline std::atomic<float> radius_scale{1.f};
-   inline std::atomic<unsigned> quality{1}; // 0: XE_GTAO_QUALITY 1 (7 slices), 1: XE_GTAO_QUALITY 2 (10 slices)
+   inline std::atomic<unsigned> quality{1}; // 0: XE_GTAO_QUALITY 1 (XeGTAO 7 slices), 1: XE_GTAO_QUALITY 2 (10); VB-GTAO 4 slices of 4 or 6 steps
 
    // The game's AO arrays are the AO resolution deinterleaved 4x4 (16 slices). The AO resolution need not be a
    // multiple of 4 (DLSS Balanced at 4K renders AO at 1114x628), so accept arrays rounded up or down.
