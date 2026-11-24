@@ -48,10 +48,19 @@ cbuffer LumaGTAO : register(b11)
 // VB-GTAO's reference implementation applies no power. Its object thickness (view space units, meters in this game) and
 // steps per slice side were fitted the same way: against cosine weighted ray traced AO (true thickness, bounded at the
 // game's AO radius) on synthetic scenes with the game's camera. The shared defaults (0.2, 3) left most of the occlusion out.
+// VB-GTAO's accuracy comes from its steps; after the denoise its slice count hardly matters. So it runs 4 slices at both
+// presets (High 6 steps, Medium 4), which costs about what XeGTAO's High preset does and still errs less against the
+// reference (10 slices of 8 steps cost 3.2 times as much for 3-7% less error).
 #if VISIBILITY_BITMASK
 #define FinalValuePowerRT 1.0
 #define THICKNESS         0.75
-#define STEPS_PER_SLICE   8.0
+#if XE_GTAO_QUALITY >= 2
+#define STEPS_PER_SLICE 6.0
+#else
+#define STEPS_PER_SLICE 4.0
+#endif
+#undef XE_GTAO_QUALITY
+#define XE_GTAO_QUALITY 0 // 4 slices
 #else
 #define FinalValuePowerRT 2.2
 #endif

@@ -197,7 +197,7 @@ namespace Battlefront2Psycho
       {BackgroundB, "PsychoBackgroundB", 0.18f, 0.001f, 0.95f},
       {SDRWhite, "PsychoSDRWhite", 100, 80, 300},
       {BloomStrength, "PostBloomStrength", 0, 0, 2},
-      {GlareStrength, "PostGlareStrength", 1, 0, 4},
+      {GlareStrength, "PostGlareStrength", 0.33f, 0, 1},
       {LightGamutExpansion, "PostLightGamutExpansion", 1, 0, 1},
       {VignetteStrength, "PostVignetteStrength", 0, 0, 1},
       {SDRDither, "PostSDRDither", 1, 0, 1},
@@ -619,10 +619,11 @@ namespace Battlefront2Glare
       const P::Mapper mapper = P::MapperOf(tone.uploaded);
       const float strength = values[P::GlareStrength];
       if (strength <= 0.f || mapper == P::Mapper::Native || !passes[0] || !passes[1] || !passes[2] || !state.Ensure(device, tone.width, tone.height)) return nullptr;
-      // The brightest scene value the display shows, in the scene's units (1 = scene white): the peak over scene
-      // white in HDR and white itself in SDR, before the tone mapper's exposure. Light beyond it is the excess.
+      // The brightest scene value an HDR display shows, in the scene's units (1 = scene white): the peak over scene white,
+      // before the tone mapper's exposure. Light beyond it is the excess. SDR uses the same lights: with white as the
+      // limit, 20-77% of a bright frame's light became a veil over the picture (0.3-4% in HDR).
       const float white = mapper == P::Mapper::GT7 ? values[P::GT7PaperWhite] : values[P::HDRPaper];
-      const float peak = (values[P::OutputHDR] != 0.f ? values[P::HDRPeak] / white : 1.f) / std::exp2(values[P::ExposureField(mapper)]);
+      const float peak = values[P::HDRPeak] / white / std::exp2(values[P::ExposureField(mapper)]);
       const float m = std::pow(peak * .01f, .1593017578125f);
       const float peak_pq = std::pow((.8359375f + 18.8515625f * m) / (1.f + 18.6875f * m), 78.84375f);
       DrawStateStack<DrawStateStackType::Compute> saved;
@@ -893,6 +894,8 @@ namespace Battlefront2Compare
       Failed
    };
    inline std::atomic<Status> status{Status::Idle};
+   // The menu's Screenshots section is hidden unless BattlefrontIIComparisonScreenshots=1.
+   inline bool menu = false;
    inline std::atomic<int64_t> requested_at{0};
    inline std::mutex folder_mutex;
    inline std::string saved_folder; // UTF-8, for the menu

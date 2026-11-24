@@ -2039,6 +2039,7 @@ private:
       Battlefront2SSR::Load();
       Battlefront2XeGTAO::Load();
       Battlefront2Psycho::Load();
+      reshade::get_config_value(nullptr, NAME, "BattlefrontIIComparisonScreenshots", Battlefront2Compare::menu);
       bool stored_full_res_transparency = true;
       reshade::get_config_value(nullptr, NAME, "BattlefrontIIFullResolutionTransparency", stored_full_res_transparency);
       full_resolution_transparency = stored_full_res_transparency;
