@@ -22,6 +22,7 @@ cbuffer PsychoControls : register(b11) { float4 Psycho[19]; };
 #define PSYCHO_LUT_STRENGTH Psycho[8].w
 #define PSYCHO_NATIVE_UI (Psycho[9].x != 0.0f)
 #define PSYCHO_DOF_DISABLED (Psycho[9].y != 0.0f)
+#define BF2_GLARE_STRENGTH Psycho[2].x
 #define BF2_LIGHT_GAMUT_EXPANSION Psycho[2].y
 #define BF2_BLOOM_STRENGTH Psycho[9].z
 #define BF2_VIGNETTE_STRENGTH Psycho[9].w

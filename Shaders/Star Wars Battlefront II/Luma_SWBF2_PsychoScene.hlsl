@@ -27,6 +27,11 @@ Texture3D<float4> SeparatedGrade : register(t8);
 // (Battlefront2PostDLSS::State::Replay); unbound without them.
 Texture2D<float3> LightLayer : register(t9);
 #endif
+#if !BF2_NATIVE_POST
+// The eye glare's veil (Luma_SWBF2_Glare.hlsl), half the size; unbound without glare.
+Texture2D<float3> GlareVeil : register(t10);
+SamplerState GlareSampler : register(s6);
+#endif
 SamplerState SceneSampler : register(s0);
 SamplerState GradeSampler : register(s1);
 SamplerState AuxiliarySampler : register(s2);
@@ -112,6 +117,13 @@ float4 main(float4 position : SV_Position, float4 unused : TEXCOORD0, float2 uv 
    }
    vignette=lerp(1.0f,vignette,BF2_VIGNETTE_STRENGTH);
    color=(color*N[6].xyz-N[15].xyz)*vignette+N[15].xyz;
+#if !BF2_NATIVE_POST
+   // Eye glare is scene light like bloom: it joins the light the grade takes in.
+   [branch] if(BF2_GLARE_STRENGTH>0.0f) {
+      uint veilWidth,veilHeight; GlareVeil.GetDimensions(veilWidth,veilHeight);
+      if(veilWidth>0 && veilHeight>0) color+=GlareVeil.SampleLevel(GlareSampler,position.xy/(2.0f*float2(veilWidth,veilHeight)),0);
+   }
+#endif
    float3 ungradedPQ=BF2PQEncode(color);
    float3 gradeUV=ungradedPQ*(32.0f/33.0f)+(0.5f/33.0f);
    color=ungradedPQ;

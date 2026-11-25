@@ -13,7 +13,6 @@
 Texture2D<float4> Scene : register(t0);
 Texture2D<float4> Overlay : register(t1);
 Texture1D<float> PQToLinear : register(t2);
-Texture2D<float3> Glare : register(t3); // Luma_SWBF2_Glare.hlsl; unbound without glare.
 Texture2D<float> Darken : register(t9);
 Texture3D<float3> DisplayMapping : register(t10);
 Texture2D<float4> DebugOverlay : register(t12);
@@ -88,16 +87,14 @@ float4 main(float4 position : SV_Position, float2 uv : TEXCOORD0) : SV_Target
 #else
    // The game's decoded grade is linear BT.709 in 100-nit units, where the
    // game's own SDR output has its white at 1.0. Each tone mapper takes that
-   // signal; scene/paper white scales its OUTPUT, not its input. Eye glare is
-   // scene light and joins it before the fade.
+   // signal; scene/paper white scales its OUTPUT, not its input.
    color=BF2PQDecode(color);
    // The scene's alpha is the share of the pixel's light from blaster bolts and
    // sabers (Luma_SWBF2_PsychoScene.hlsl); in HDR with a BT.2020 target their
    // colour is expanded toward BT.2020.
    [branch] if(PSYCHO_HDR && Psycho[4].x!=0.0f && BF2_LIGHT_GAMUT_EXPANSION>0.0f)
       color=BF2ExpandGamut(color,BF2_LIGHT_GAMUT_EXPANSION*saturate(Scene.SampleLevel(PointSampler,uv,0).a));
-   color+=Glare.SampleLevel(LinearSampler,uv,0);
-   // The game fades in PQ. Mirrored for negative channels, which the gamut expansion and the glare can carry.
+   // The game fades in PQ. Mirrored for negative channels, which the gamut expansion can carry.
    [branch] if(N[2].x!=1.0f) color=sign(color)*BF2PQDecode(BF2PQEncode(abs(color))*N[2].x);
    float paper=PsychoPaperNits();
 #if BF2_GT7
