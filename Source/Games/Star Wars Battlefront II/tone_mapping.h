@@ -45,7 +45,7 @@ namespace Battlefront2Psycho
       LightGamutExpansion,
       Unused10,
       Purity,
-      Unused12,
+      GlareLimit,
       Unused13,
       Unused14,
       GamutCompression,
@@ -197,7 +197,9 @@ namespace Battlefront2Psycho
       {BackgroundB, "PsychoBackgroundB", 0.18f, 0.001f, 0.95f},
       {SDRWhite, "PsychoSDRWhite", 100, 80, 300},
       {BloomStrength, "PostBloomStrength", 0, 0, 2},
-      {GlareStrength, "PostGlareStrength", 0.33f, 0, 1},
+      {GlareStrength, "PostGlareStrength", 1, 0, 1},
+      // The most light one pixel may add to the eye glare, in nits as the display shows them (config only).
+      {GlareLimit, "PostGlareLimit", 2000, 100, 10000},
       {LightGamutExpansion, "PostLightGamutExpansion", 1, 0, 1},
       {VignetteStrength, "PostVignetteStrength", 0, 0, 1},
       {SDRDither, "PostSDRDither", 1, 0, 1},
@@ -434,7 +436,7 @@ namespace Battlefront2Psycho
       ID3D11VertexShader* vs, ID3D11PixelShader* ps, ID3D11ShaderResourceView* source, UINT uav_count,
       ID3D11ShaderResourceView* separated_grade = nullptr,
       UINT source_width = 0, UINT source_height = 0, UINT crop_x = 0, UINT crop_y = 0, ID3D11RenderTargetView* target_override = nullptr,
-      ID3D11ShaderResourceView* light_layer = nullptr)
+      ID3D11ShaderResourceView* light_layer = nullptr, ID3D11ShaderResourceView* glare = nullptr, ID3D11SamplerState* glare_sampler = nullptr)
    {
       DrawStateStack<DrawStateStackType::FullGraphics> saved;
       saved.Cache(context, uav_count);
@@ -444,6 +446,9 @@ namespace Battlefront2Psycho
       context->PSGetShaderResources(8, 2, &previous_grade[0]);
       ID3D11ShaderResourceView* const grade_and_light[2] = {separated_grade, light_layer};
       context->PSSetShaderResources(8, 2, grade_and_light);
+      // The eye glare's veil and its sampler (the stack restores their slots).
+      context->PSSetShaderResources(10, 1, &glare);
+      context->PSSetSamplers(6, 1, &glare_sampler);
       com_ptr<ID3D11GeometryShader> gs;
       com_ptr<ID3D11HullShader> hs;
       com_ptr<ID3D11DomainShader> ds;
@@ -514,7 +519,8 @@ namespace Battlefront2Psycho
    }
 } // namespace Battlefront2Psycho
 
-// Eye glare (Luma_SWBF2_Glare.hlsl): the veil the eye would cast around the scene light the display cannot show.
+// Eye glare (Luma_SWBF2_Glare.hlsl): the veil the eye would cast around the scene light the display cannot show. The
+// scene shader adds it to the scene light ahead of the game's grade, like bloom.
 namespace Battlefront2Glare
 {
    inline constexpr UINT max_levels = 8;
@@ -556,6 +562,10 @@ namespace Battlefront2Glare
       std::array<com_ptr<ID3D11ShaderResourceView>, max_levels> light_srv, veil_srv;
       std::array<com_ptr<ID3D11UnorderedAccessView>, max_levels> light_uav, veil_uav;
       com_ptr<ID3D11Buffer> constants;
+      // The scene levels the grade maps to the display's peak and to the glare's limit (two floats).
+      com_ptr<ID3D11Texture2D> cutoff;
+      com_ptr<ID3D11ShaderResourceView> cutoff_srv;
+      com_ptr<ID3D11UnorderedAccessView> cutoff_uav;
       // Each level's share of the light. The shader's filters blur level k by sqrt(4^(k+1) - 3) scene pixels
       // (sigma), which stands for the Gaussians up to halfway to the next level's width. Narrower ones than the
       // first level's stay inside the source; the last level also stands for the octave above it.
@@ -584,7 +594,12 @@ namespace Battlefront2Glare
          D3D11_BUFFER_DESC bd{};
          bd.ByteWidth = 16; // cbuffer GlareControls
          bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-         if (FAILED(device->CreateTexture2D(&d, nullptr, &light)) || FAILED(device->CreateTexture2D(&d, nullptr, &veil)) || FAILED(device->CreateBuffer(&bd, nullptr, &constants))) return false;
+         D3D11_TEXTURE2D_DESC cd{};
+         cd.Width = 2;
+         cd.Height = cd.MipLevels = cd.ArraySize = cd.SampleDesc.Count = 1;
+         cd.Format = DXGI_FORMAT_R32_FLOAT;
+         cd.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+         if (FAILED(device->CreateTexture2D(&d, nullptr, &light)) || FAILED(device->CreateTexture2D(&d, nullptr, &veil)) || FAILED(device->CreateBuffer(&bd, nullptr, &constants)) || FAILED(device->CreateTexture2D(&cd, nullptr, &cutoff)) || FAILED(device->CreateShaderResourceView(cutoff.get(), nullptr, &cutoff_srv)) || FAILED(device->CreateUnorderedAccessView(cutoff.get(), nullptr, &cutoff_uav))) return false;
          for (UINT i = 0; i < count; ++i)
          {
             D3D11_SHADER_RESOURCE_VIEW_DESC sv{};
@@ -609,47 +624,79 @@ namespace Battlefront2Glare
       }
    };
 
-   // Draws the veil of the private scene with the three passes of Luma_SWBF2_Glare.hlsl. Returns it for the
-   // display shader, or null without glare: off, Native, or unavailable.
+   // The grade the scene shader applies: none, the game's own table or Luma's separated one.
+   enum class Grade : UINT
+   {
+      None,
+      Native,
+      Separated
+   };
+   // Draws the veil of the scene the grade takes in (`scene`, shifted by the crop, times the exposure of the scene
+   // pass's constants) with the passes of Luma_SWBF2_Glare.hlsl. Returns it for the scene shader, or null without
+   // glare: off, Native, or unavailable.
    inline ID3D11ShaderResourceView* Draw(ID3D11Device* device, ID3D11DeviceContext* context, State& state,
-      const Battlefront2Psycho::State& tone, const std::array<ID3D11ComputeShader*, 3>& passes, ID3D11SamplerState* linear_sampler, UINT uav_count)
+      const Battlefront2Psycho::State& tone, const std::array<ID3D11ComputeShader*, 4>& passes, ID3D11ShaderResourceView* scene,
+      ID3D11ShaderResourceView* grade, Grade grade_kind, ID3D11Buffer* scene_constants, UINT first_constant, UINT constant_count,
+      UINT crop_x, UINT crop_y, ID3D11SamplerState* linear_sampler, UINT uav_count)
    {
       namespace P = Battlefront2Psycho;
       const auto& values = tone.uploaded.values;
       const P::Mapper mapper = P::MapperOf(tone.uploaded);
       const float strength = values[P::GlareStrength];
-      if (strength <= 0.f || mapper == P::Mapper::Native || !passes[0] || !passes[1] || !passes[2] || !state.Ensure(device, tone.width, tone.height)) return nullptr;
-      // The brightest scene value an HDR display shows, in the scene's units (1 = scene white): the peak over scene white,
-      // before the tone mapper's exposure. Light beyond it is the excess. SDR uses the same lights: with white as the
-      // limit, 20-77% of a bright frame's light became a veil over the picture (0.3-4% in HDR).
+      if (strength <= 0.f || mapper == P::Mapper::Native || !scene || !scene_constants || (grade_kind != Grade::None && !grade) || !passes[0] || !passes[1] || !passes[2] || !passes[3] || !state.Ensure(device, tone.width, tone.height)) return nullptr;
+      // The brightest value an HDR display shows, in the units the grade gives (1 = SDR white): the peak over scene white,
+      // before the tone mapper's exposure. Light beyond it is the excess; the grade maps the scene level `cutoff`
+      // to it. The limit is a brightness as the display would show it, in the same units. SDR uses the same lights:
+      // with white as the limit, 20-77% of a bright frame's light became a veil over the picture (0.3-4% in HDR).
       const float white = mapper == P::Mapper::GT7 ? values[P::GT7PaperWhite] : values[P::HDRPaper];
-      const float peak = values[P::HDRPeak] / white / std::exp2(values[P::ExposureField(mapper)]);
-      const float m = std::pow(peak * .01f, .1593017578125f);
-      const float peak_pq = std::pow((.8359375f + 18.8515625f * m) / (1.f + 18.6875f * m), 78.84375f);
+      const float to_units = 1.f / white / std::exp2(values[P::ExposureField(mapper)]);
+      const float peak = values[P::HDRPeak] * to_units;
+      const float limit = values[P::GlareLimit] * to_units;
       DrawStateStack<DrawStateStackType::Compute> saved;
       saved.Cache(context, uav_count);
       ID3D11Buffer* constants = state.constants.get();
       context->CSSetConstantBuffers(0, 1, &constants);
+      com_ptr<ID3D11DeviceContext1> context1;
+      context->QueryInterface(&context1);
+      if (context1)
+         context1->CSSetConstantBuffers1(1, 1, &scene_constants, &first_constant, &constant_count);
+      else
+         context->CSSetConstantBuffers(1, 1, &scene_constants);
       context->CSSetSamplers(0, 1, &linear_sampler);
-      const auto pass = [&](ID3D11ComputeShader* shader, ID3D11ShaderResourceView* source, ID3D11ShaderResourceView* coarser, ID3D11UnorderedAccessView* target, UINT level, float x, float y, float z = 0.f)
+      const auto pass = [&](ID3D11ComputeShader* shader, ID3D11ShaderResourceView* source, ID3D11ShaderResourceView* coarser, ID3D11UnorderedAccessView* target, UINT groups_x, UINT groups_y, float x, float y, float z = 0.f, float w = 0.f)
       {
-         const float control[4] = {x, y, z, 0.f};
+         const float control[4] = {x, y, z, w};
          context->UpdateSubresource(constants, 0, nullptr, control, 0, 0);
          ID3D11ShaderResourceView* const inputs[2] = {source, coarser};
          context->CSSetUnorderedAccessViews(0, 1, &target, nullptr);
          context->CSSetShaderResources(0, 2, inputs);
          context->CSSetShader(shader, nullptr, 0);
-         context->Dispatch(((state.width >> (level + 1)) + 7) / 8, ((state.height >> (level + 1)) + 7) / 8, 1);
+         context->Dispatch(groups_x, groups_y, 1);
          ID3D11UnorderedAccessView* const none = nullptr;
          context->CSSetUnorderedAccessViews(0, 1, &none, nullptr);
       };
-      pass(passes[0], tone.srv.get(), nullptr, state.light_uav[0].get(), 0, peak, peak_pq, P::LightGamutExpansionAmount(tone.uploaded));
+      const auto level_groups = [&](UINT level)
+      {
+         return std::pair<UINT, UINT>(((state.width >> (level + 1)) + 7) / 8, ((state.height >> (level + 1)) + 7) / 8);
+      };
+      // The cutoffs, then the light above the first at half the size, no pixel counting for more than the second.
+      ID3D11ShaderResourceView* grade_input = grade_kind != Grade::None ? grade : nullptr;
+      context->CSSetShaderResources(2, 1, &grade_input);
+      pass(passes[3], nullptr, nullptr, state.cutoff_uav.get(), 2, 1, peak, grade_kind != Grade::None ? 1.f : 0.f, limit);
+      ID3D11ShaderResourceView* cutoff_input = state.cutoff_srv.get();
+      context->CSSetShaderResources(3, 1, &cutoff_input);
+      const auto [groups_x, groups_y] = level_groups(0);
+      pass(passes[0], scene, nullptr, state.light_uav[0].get(), groups_x, groups_y, peak, 0.f, float(crop_x), float(crop_y));
       for (UINT i = 1; i < state.levels; ++i)
-         pass(passes[1], state.light_srv[i - 1].get(), nullptr, state.light_uav[i].get(), i, 0.f, 0.f);
+      {
+         const auto [x, y] = level_groups(i);
+         pass(passes[1], state.light_srv[i - 1].get(), nullptr, state.light_uav[i].get(), x, y, 0.f, 0.f);
+      }
       for (UINT i = state.levels - 1; i-- > 0;)
       {
          const bool top = i + 2 == state.levels;
-         pass(passes[2], state.light_srv[i].get(), top ? state.light_srv[i + 1].get() : state.veil_srv[i + 1].get(), state.veil_uav[i].get(), i,
+         const auto [x, y] = level_groups(i);
+         pass(passes[2], state.light_srv[i].get(), top ? state.light_srv[i + 1].get() : state.veil_srv[i + 1].get(), state.veil_uav[i].get(), x, y,
             float(strength * state.shares[i]), top ? float(strength * state.shares[i + 1]) : 1.f);
       }
       saved.Restore(context);

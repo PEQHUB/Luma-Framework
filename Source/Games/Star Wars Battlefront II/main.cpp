@@ -59,11 +59,12 @@ inline constexpr std::array<std::array<uint32_t, 2>, 2> bf2_xegtao_main_keys = {
    {CompileTimeStringHash("Battlefront II VB-GTAO Main Pass CS (Medium)"), CompileTimeStringHash("Battlefront II VB-GTAO Main Pass CS (High)")},
 }};
 inline constexpr uint32_t bf2_xegtao_denoise_key = CompileTimeStringHash("Battlefront II XeGTAO Denoise CS");
-// The eye glare passes (Luma_SWBF2_Glare.hlsl, BF2_GLARE_PASS 0 to 2).
-inline constexpr std::array<uint32_t, 3> bf2_glare_keys = {
+// The eye glare passes (Luma_SWBF2_Glare.hlsl, BF2_GLARE_PASS 0 to 3).
+inline constexpr std::array<uint32_t, 4> bf2_glare_keys = {
    CompileTimeStringHash("Battlefront II Glare Excess CS"),
    CompileTimeStringHash("Battlefront II Glare Down CS"),
-   CompileTimeStringHash("Battlefront II Glare Veil CS")};
+   CompileTimeStringHash("Battlefront II Glare Veil CS"),
+   CompileTimeStringHash("Battlefront II Glare Cutoff CS")};
 
 inline constexpr std::array<uint32_t, 12> bf2_video_shader_keys = {
    CompileTimeStringHash("Battlefront II SDR Video PS 0"), CompileTimeStringHash("Battlefront II SDR Video PS 1"),
@@ -1464,8 +1465,32 @@ private:
       tone.native_packed = nullptr;
       tone.scene_frame = ~uint64_t(0);
       ID3D11ShaderResourceView* light_layer = dlss ? game_data.dlss_post.LightLayer() : nullptr;
+      // The eye glare is scene light: its veil is drawn from the scene the grade takes in and added by the scene shader.
+      ID3D11ShaderResourceView* glare = nullptr;
+      if (psycho_enabled)
+      {
+         const bool native_lut = Battlefront2Psycho::LUTNative(frame_settings);
+         const auto glare_kind = native_lut ? Battlefront2Glare::Grade::Native : separated_grade ? Battlefront2Glare::Grade::Separated
+                                                                                                 : Battlefront2Glare::Grade::None;
+         com_ptr<ID3D11Buffer> scene_constants;
+         UINT first_constant = 0, constant_count = 4096;
+         com_ptr<ID3D11DeviceContext1> context1;
+         context->QueryInterface(&context1);
+         if (context1)
+            context1->PSGetConstantBuffers1(0, 1, &scene_constants, &first_constant, &constant_count);
+         else
+            context->PSGetConstantBuffers(0, 1, &scene_constants);
+         const auto glare_pass = [&](size_t pass)
+         {
+            const auto kernel = data.native_compute_shaders.find(bf2_glare_keys[pass]);
+            return kernel != data.native_compute_shaders.end() ? kernel->second.get() : nullptr;
+         };
+         glare = Battlefront2Glare::Draw(device, context, game_data.glare, tone, {glare_pass(0), glare_pass(1), glare_pass(2), glare_pass(3)}, input,
+            native_lut ? grade.get() : separated_grade, glare_kind, scene_constants.get(), first_constant, constant_count, crop_x, crop_y,
+            data.sampler_state_linear.get(), data.uav_max_count);
+      }
       Battlefront2Psycho::DrawScene(context, tone, vs.get(), ps.get(), input, data.uav_max_count, separated_grade,
-         width, height, crop_x, crop_y, nullptr, light_layer);
+         width, height, crop_x, crop_y, nullptr, light_layer, glare, data.sampler_state_linear.get());
       // For the tone mapper comparison, also draw the other scene path: Native uses the game's whole grade, the
       // other mappers Luma's.
       tone.compare_frame = ~uint64_t(0);
@@ -1710,17 +1735,6 @@ private:
          saved.Restore(context);
          return false;
       }
-      // The scene's eye glare, which the Luma tone mappers' display shaders read at t3.
-      const auto glare_pass = [&](size_t pass)
-      {
-         const auto kernel = data.native_compute_shaders.find(bf2_glare_keys[pass]);
-         return kernel != data.native_compute_shaders.end() ? kernel->second.get() : nullptr;
-      };
-      ID3D11ShaderResourceView* glare = Battlefront2Glare::Draw(device, context, game_data.glare, tone,
-         {glare_pass(0), glare_pass(1), glare_pass(2)}, data.sampler_state_linear.get(), data.uav_max_count);
-      com_ptr<ID3D11ShaderResourceView> previous_glare;
-      context->PSGetShaderResources(3, 1, &previous_glare);
-      context->PSSetShaderResources(3, 1, &glare);
       ID3D11ShaderResourceView* replacement = tone.srv.get();
       context->PSSetShaderResources(0, 1, &replacement);
       ID3D11Buffer* cb = tone.constants.get();
@@ -1730,8 +1744,6 @@ private:
       original_draw();
       if (Battlefront2Compare::Pending() && tone.compare_frame == frame && td.SampleDesc.Count == 1)
          RenderToneMapperComparison(device, context, data, game_data, original_draw, linear_filter, td, frame);
-      glare = previous_glare.get();
-      context->PSSetShaderResources(3, 1, &glare);
       if (aces2) previous_aces2.Restore(context);
       saved.Restore(context);
       if (tone.used_dlss)
@@ -1992,8 +2004,8 @@ private:
             add_shader(bf2_xegtao_main_keys[method][quality], "Luma_SWBF2_XeGTAO", D3D11_SHVER_COMPUTE_SHADER, "main_pass_cs", {{"VISIBILITY_BITMASK", xegtao_bitmask[method]}, {"XE_GTAO_QUALITY", xegtao_quality[quality]}});
       }
       add_shader(bf2_xegtao_denoise_key, "Luma_SWBF2_XeGTAO", D3D11_SHVER_COMPUTE_SHADER, "denoise_pass_cs", {{"XE_GTAO_FINAL_APPLY", "1"}});
-      constexpr std::array<const char*, 3> glare_pass = {"0", "1", "2"};
-      for (size_t pass = 0; pass < 3; ++pass)
+      constexpr std::array<const char*, 4> glare_pass = {"0", "1", "2", "3"};
+      for (size_t pass = 0; pass < glare_pass.size(); ++pass)
          add_shader(bf2_glare_keys[pass], "Luma_SWBF2_Glare", D3D11_SHVER_COMPUTE_SHADER, "main", {{"BF2_GLARE_PASS", glare_pass[pass]}});
 
       luma_settings_cbuffer_index = 13;
