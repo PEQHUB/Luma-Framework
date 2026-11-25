@@ -5,13 +5,15 @@
 // level's share of the light (Battlefront2Glare in tone_mapping.h).
 //
 // The veil joins the scene light the grade takes in, after the game's exposure, like bloom (the scene shader,
-// Luma_SWBF2_PsychoScene.hlsl). Pass 3 finds the scene levels the grade maps to the display's peak and to the limit,
-// the brightest light a pixel may count for as the display would show it; pass 0 takes the light between them.
+// Luma_SWBF2_PsychoScene.hlsl). Pass 3 finds the scene level the grade maps to the display's peak; pass 0 takes the
+// light above it. Nothing is capped: the veil is what the eye would scatter from the light the scene holds, except
+// the spark sprites (the add-on draws them into a layer of their own): they carry their glow in the texture already.
 #include "Includes/PsychoSettings.hlsl"
 
 #if BF2_GLARE_PASS == 0
 Texture2D<float3> Scene : register(t0); // The scene the grade takes in, before the game's exposure.
 Texture2D<float> Cutoff : register(t3);
+Texture2D<float4> Sparks : register(t4); // The spark sprites' light and coverage at the render's size; unbound: none.
 cbuffer FrostbiteGlobals : register(b1) { float4 N[18]; }; // The scene pass's own constants: N[6] is the exposure.
 #elif BF2_GLARE_PASS == 3
 Texture3D<float4> Grade : register(t2); // The grade the scene pass applies: PQ in, PQ out.
@@ -25,7 +27,7 @@ RWTexture2D<float> CutoffTarget : register(u0);
 RWTexture2D<float4> Target : register(u0);
 #endif
 SamplerState LinearSampler : register(s0);
-// Pass 0: zw the crop of the scene (pixels). Pass 3: x the peak, y 1 when there is a grade, z the limit. Passes 1 and
+// Pass 0: xy the size of the picture, zw the crop of the scene (pixels). Pass 3: x the peak, y 1 when there is a grade. Passes 1 and
 // 2: the level's share of the light, and the weight of the coarser veil.
 cbuffer GlareControls : register(b0) { float4 Glare; };
 
@@ -50,12 +52,11 @@ uint FirstAt(float target)
    return k;
 }
 
-// One group per target: group 0 finds the scene level the grade maps to the display's peak (Glare.x), group 1 the
-// level it maps to the limit (Glare.z). Both are 1e30 when the grade never gets there.
+// Finds the scene level the grade maps to the display's peak (Glare.x): 1e30 when the grade never gets there.
 [numthreads(64, 1, 1)]
-void main(uint gi : SV_GroupIndex, uint3 group : SV_GroupID)
+void main(uint gi : SV_GroupIndex)
 {
-   float target = group.x == 0 ? Glare.x : Glare.z;
+   float target = Glare.x;
    if (gi == 0) Range = float2(-8.0f, 12.0f); // log2 of the scene level
    GroupMemoryBarrierWithGroupSync();
    // Two rounds of 64 guesses along the grey axis, the second inside the bracket of the first.
@@ -82,25 +83,28 @@ void main(uint gi : SV_GroupIndex, uint3 group : SV_GroupID)
       }
       GroupMemoryBarrierWithGroupSync();
    }
-   if (gi == 0) CutoffTarget[uint2(group.x, 0)] = Range.x >= 1e29f ? 1e30f : exp2(Range.x);
+   if (gi == 0) CutoffTarget[uint2(0, 0)] = Range.x >= 1e29f ? 1e30f : exp2(Range.x);
 }
 #else
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID)
 {
 #if BF2_GLARE_PASS == 0
-   // The light above the cutoff, a pixel counting for no more than the scene level the grade maps to the limit,
-   // averaged over 2x2 pixels.
+   // The light above the cutoff, averaged over 2x2 pixels.
    float cutoff = Cutoff.Load(int3(0, 0, 0));
-   float cap = Cutoff.Load(int3(1, 0, 0));
    uint2 crop = uint2(Glare.zw);
    float3 excess = 0.0f;
    [unroll] for (uint i = 0; i < 4; ++i)
    {
-      float3 light = max(Scene.Load(int3(id.xy * 2 + uint2(i & 1, i >> 1) + crop, 0)), 0.0f) * N[6].xyz;
+      uint2 pixel = id.xy * 2 + uint2(i & 1, i >> 1) + crop;
+      float3 light = max(Scene.Load(int3(pixel, 0)), 0.0f) * N[6].xyz;
       if (!all(isfinite(light))) light = 0.0f;
+      // The picture's pixel as a fraction of the picture: the render fills it whole, whatever its size. A bilinear tap
+      // reaches a render pixel further than the sprite, which covers the temporal pass's blur.
+      float4 spark = Sparks.SampleLevel(LinearSampler, (float2(pixel - crop) + 0.5f) / Glare.xy, 0);
+      if (any(spark > 1e-3f)) light = 0.0f;
       float luminance = max(dot(light, float3(0.2126f, 0.7152f, 0.0722f)), 1e-6f);
-      excess += light * (max(min(luminance, cap) - cutoff, 0.0f) / luminance);
+      excess += light * (max(luminance - cutoff, 0.0f) / luminance);
    }
    Target[id.xy] = float4(excess * 0.25f, 0.0f);
 #elif BF2_GLARE_PASS == 1

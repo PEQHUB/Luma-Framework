@@ -532,7 +532,7 @@ namespace Battlefront2Psycho
       case LUTStrength:
          return "The game's colors: map tint, saturation and the whitening of bright lights. 0% shows the scene's own colors. 100% is the game's grading.";
       case GlareStrength:
-         return "Glow around very bright lights such as the sun, lightsabers and explosions, as the eye would see it. 1.00 is physical.";
+         return "Glow around very bright lights such as the sun, lightsabers and explosions, as the eye would see it.";
       case LightGamutExpansion:
          return "Expands the colour of blaster bolts and lightsabers from BT.709 toward BT.2020, keeping brightness and hue. 0 is the game's colour. HDR with DLSS only.";
       default:
@@ -567,7 +567,7 @@ namespace Battlefront2Psycho
       ImGui::PushID(int(field));
       Battlefront2UI::Row(label);
       ImGui::BeginDisabled(disabled);
-      if (field == NativeUI || field == MotionBlurEnabled)
+      if (field == NativeUI || field == MotionBlurEnabled || field == GlareStrength)
       {
          bool enabled = v != 0.f;
          if (Battlefront2UI::Checkbox("##value", &enabled))

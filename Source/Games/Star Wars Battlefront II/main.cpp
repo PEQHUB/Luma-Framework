@@ -83,6 +83,7 @@ struct Battlefront2GameDeviceData final : public GameDeviceData
    Battlefront2XeGTAO::State xegtao;
    Battlefront2Psycho::State psycho;
    Battlefront2Glare::State glare;
+   Battlefront2Sparks::Layer sparks;
    Battlefront2ACES2::State aces2;
    Battlefront2NativePresentation::State native_presentation;
    Battlefront2Video::State video_presentation;
@@ -817,6 +818,7 @@ private:
       game_device_data.dlss_output_mips_token = 0;
       game_device_data.psycho.Reset();
       game_device_data.glare.Reset();
+      game_device_data.sparks.Reset();
       game_device_data.aces2.Reset();
       game_device_data.native_presentation.Reset();
       game_device_data.video_presentation.Reset();
@@ -1473,7 +1475,7 @@ private:
          };
          glare = Battlefront2Glare::Draw(device, context, game_data.glare, tone, {glare_pass(0), glare_pass(1), glare_pass(2), glare_pass(3)}, input,
             native_lut ? grade.get() : separated_grade, glare_kind, scene_constants.get(), first_constant, constant_count, crop_x, crop_y,
-            data.sampler_state_linear.get(), data.uav_max_count);
+            game_data.sparks.Srv(frame), data.sampler_state_linear.get(), data.uav_max_count);
       }
       Battlefront2Psycho::DrawScene(context, tone, vs.get(), ps.get(), input, data.uav_max_count, separated_grade,
          width, height, crop_x, crop_y, nullptr, light_layer, glare, data.sampler_state_linear.get());
@@ -2352,6 +2354,13 @@ private:
       auto& game_device_data = GetGameDeviceData(device_data);
       const bool is_dispatch = stages == reshade::api::shader_stage::all_compute;
       const bool is_immediate_context = native_device_context != nullptr && native_device_context->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE;
+      // Spark sprites drawn before the temporal pass also go into a layer the eye glare ignores.
+      if (!is_custom_pass && is_immediate_context && !is_dispatch && original_draw_dispatch_func && original_shader_hashes.HasAny(reshade::api::shader_stage::pixel) && game_device_data.dlss_post.frame != cb_luma_global_settings.FrameIndex && Battlefront2Sparks::Matches(uint32_t(*original_shader_hashes.pixel_shaders.begin())))
+      {
+         const auto& tone_settings = game_device_data.psycho.Frame(cb_luma_global_settings.FrameIndex);
+         if (tone_settings.values[Battlefront2Psycho::GlareStrength] > 0.f && tone_settings.values[Battlefront2Psycho::Enabled] != 0.f && Battlefront2Psycho::MapperOf(tone_settings) != Battlefront2Psycho::Mapper::Native && game_device_data.sparks.Draw(native_device, native_device_context, cb_luma_global_settings.FrameIndex, *original_draw_dispatch_func))
+            return DrawOrDispatchOverrideType::Replaced;
+      }
       if (!is_custom_pass && is_dispatch && !is_immediate_context && original_shader_hashes.HasAny(reshade::api::shader_stage::compute) && Battlefront2NativeLUT::SourceCount(*original_shader_hashes.compute_shaders.begin()) >= 0)
          game_device_data.native_lut.MarkDeferredUnsupported();
       Battlefront2PostDLSS::NativeDrawGuard native_depth_guard{

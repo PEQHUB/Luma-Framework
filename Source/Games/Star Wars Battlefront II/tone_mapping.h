@@ -45,7 +45,7 @@ namespace Battlefront2Psycho
       LightGamutExpansion,
       Unused10,
       Purity,
-      GlareLimit,
+      Unused12,
       Unused13,
       Unused14,
       GamutCompression,
@@ -197,9 +197,8 @@ namespace Battlefront2Psycho
       {BackgroundB, "PsychoBackgroundB", 0.18f, 0.001f, 0.95f},
       {SDRWhite, "PsychoSDRWhite", 100, 80, 300},
       {BloomStrength, "PostBloomStrength", 0, 0, 2},
+      // Eye glare, on (1) or off (0). It is always the physical amount (the CIE function); a saved fraction counts as on.
       {GlareStrength, "PostGlareStrength", 1, 0, 1},
-      // The most light one pixel may add to the eye glare, in nits as the display shows them (config only).
-      {GlareLimit, "PostGlareLimit", 2000, 100, 10000},
       {LightGamutExpansion, "PostLightGamutExpansion", 1, 0, 1},
       {VignetteStrength, "PostVignetteStrength", 0, 0, 1},
       {SDRDither, "PostSDRDither", 1, 0, 1},
@@ -595,7 +594,7 @@ namespace Battlefront2Glare
          bd.ByteWidth = 16; // cbuffer GlareControls
          bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
          D3D11_TEXTURE2D_DESC cd{};
-         cd.Width = 2;
+         cd.Width = 1;
          cd.Height = cd.MipLevels = cd.ArraySize = cd.SampleDesc.Count = 1;
          cd.Format = DXGI_FORMAT_R32_FLOAT;
          cd.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
@@ -637,21 +636,19 @@ namespace Battlefront2Glare
    inline ID3D11ShaderResourceView* Draw(ID3D11Device* device, ID3D11DeviceContext* context, State& state,
       const Battlefront2Psycho::State& tone, const std::array<ID3D11ComputeShader*, 4>& passes, ID3D11ShaderResourceView* scene,
       ID3D11ShaderResourceView* grade, Grade grade_kind, ID3D11Buffer* scene_constants, UINT first_constant, UINT constant_count,
-      UINT crop_x, UINT crop_y, ID3D11SamplerState* linear_sampler, UINT uav_count)
+      UINT crop_x, UINT crop_y, ID3D11ShaderResourceView* sparks, ID3D11SamplerState* linear_sampler, UINT uav_count)
    {
       namespace P = Battlefront2Psycho;
       const auto& values = tone.uploaded.values;
       const P::Mapper mapper = P::MapperOf(tone.uploaded);
-      const float strength = values[P::GlareStrength];
-      if (strength <= 0.f || mapper == P::Mapper::Native || !scene || !scene_constants || (grade_kind != Grade::None && !grade) || !passes[0] || !passes[1] || !passes[2] || !passes[3] || !state.Ensure(device, tone.width, tone.height)) return nullptr;
+      if (values[P::GlareStrength] <= 0.f || mapper == P::Mapper::Native || !scene || !scene_constants || (grade_kind != Grade::None && !grade) || !passes[0] || !passes[1] || !passes[2] || !passes[3] || !state.Ensure(device, tone.width, tone.height)) return nullptr;
       // The brightest value an HDR display shows, in the units the grade gives (1 = SDR white): the peak over scene white,
       // before the tone mapper's exposure. Light beyond it is the excess; the grade maps the scene level `cutoff`
-      // to it. The limit is a brightness as the display would show it, in the same units. SDR uses the same lights:
-      // with white as the limit, 20-77% of a bright frame's light became a veil over the picture (0.3-4% in HDR).
+      // to it. SDR uses the same lights: with white as the peak, 20-77% of a bright frame's light became a veil over
+      // the picture (0.3-4% in HDR).
       const float white = mapper == P::Mapper::GT7 ? values[P::GT7PaperWhite] : values[P::HDRPaper];
       const float to_units = 1.f / white / std::exp2(values[P::ExposureField(mapper)]);
       const float peak = values[P::HDRPeak] * to_units;
-      const float limit = values[P::GlareLimit] * to_units;
       DrawStateStack<DrawStateStackType::Compute> saved;
       saved.Cache(context, uav_count);
       ID3D11Buffer* constants = state.constants.get();
@@ -679,14 +676,15 @@ namespace Battlefront2Glare
       {
          return std::pair<UINT, UINT>(((state.width >> (level + 1)) + 7) / 8, ((state.height >> (level + 1)) + 7) / 8);
       };
-      // The cutoffs, then the light above the first at half the size, no pixel counting for more than the second.
+      // The cutoff, then the light above it at half the size.
       ID3D11ShaderResourceView* grade_input = grade_kind != Grade::None ? grade : nullptr;
       context->CSSetShaderResources(2, 1, &grade_input);
-      pass(passes[3], nullptr, nullptr, state.cutoff_uav.get(), 2, 1, peak, grade_kind != Grade::None ? 1.f : 0.f, limit);
+      pass(passes[3], nullptr, nullptr, state.cutoff_uav.get(), 1, 1, peak, grade_kind != Grade::None ? 1.f : 0.f);
       ID3D11ShaderResourceView* cutoff_input = state.cutoff_srv.get();
       context->CSSetShaderResources(3, 1, &cutoff_input);
       const auto [groups_x, groups_y] = level_groups(0);
-      pass(passes[0], scene, nullptr, state.light_uav[0].get(), groups_x, groups_y, peak, 0.f, float(crop_x), float(crop_y));
+      context->CSSetShaderResources(4, 1, &sparks);
+      pass(passes[0], scene, nullptr, state.light_uav[0].get(), groups_x, groups_y, float(tone.width), float(tone.height), float(crop_x), float(crop_y));
       for (UINT i = 1; i < state.levels; ++i)
       {
          const auto [x, y] = level_groups(i);
@@ -697,12 +695,109 @@ namespace Battlefront2Glare
          const bool top = i + 2 == state.levels;
          const auto [x, y] = level_groups(i);
          pass(passes[2], state.light_srv[i].get(), top ? state.light_srv[i + 1].get() : state.veil_srv[i + 1].get(), state.veil_uav[i].get(), x, y,
-            float(strength * state.shares[i]), top ? float(strength * state.shares[i + 1]) : 1.f);
+            float(state.shares[i]), top ? float(state.shares[i + 1]) : 1.f);
       }
       saved.Restore(context);
       return state.veil_srv[0].get();
    }
 } // namespace Battlefront2Glare
+
+// The spark sprites (blaster impacts, ricochets, embers) already have a glow painted into their texture and cover far
+// more of the picture than a real spark would, so their light does not feed the eye glare. The ones drawn before the
+// temporal pass are drawn once more into a layer of their own at the render's size; the glare passes ignore the light
+// that layer covers (Luma_SWBF2_Glare.hlsl, pass 0). The picture itself is not touched.
+namespace Battlefront2Sparks
+{
+   // Pixel shaders of the sprite effects, found by sampling every transparent draw of a Mos Eisley match.
+   inline constexpr std::array<uint32_t, 8> shaders = {0xF92ACE47, 0xF9B47BD9, 0x486BA8D9, 0x6A149FE3, 0xCE9479B7, 0x66CBF1C1, 0xF5BCA8ED, 0xE9781D30};
+   inline bool Matches(uint32_t hash)
+   {
+      return std::find(shaders.begin(), shaders.end(), hash) != shaders.end();
+   }
+   struct Layer
+   {
+      com_ptr<ID3D11Texture2D> texture;
+      com_ptr<ID3D11RenderTargetView> rtv;
+      com_ptr<ID3D11ShaderResourceView> srv;
+      UINT width = 0, height = 0;
+      uint64_t cleared_frame = ~uint64_t(0), drawn_frame = ~uint64_t(0);
+      // The layer when a spark was drawn this frame.
+      ID3D11ShaderResourceView* Srv(uint64_t frame) const
+      {
+         return drawn_frame == frame ? srv.get() : nullptr;
+      }
+      void Reset()
+      {
+         texture = nullptr;
+         rtv = nullptr;
+         srv = nullptr;
+         width = height = 0;
+         cleared_frame = drawn_frame = ~uint64_t(0);
+      }
+      // Runs `draw` (the game's own draw) once into its target and once into the layer. Returns false, with nothing
+      // run, when the draw is not a spark of the main view: then the caller draws as usual.
+      bool Draw(ID3D11Device* device, ID3D11DeviceContext* context, uint64_t frame, const std::function<void()>& draw)
+      {
+         com_ptr<ID3D11RenderTargetView> targets[8];
+         com_ptr<ID3D11DepthStencilView> depth;
+         context->OMGetRenderTargets(8, &targets[0], &depth);
+         if (!targets[0]) return false;
+         D3D11_RENDER_TARGET_VIEW_DESC view{};
+         targets[0]->GetDesc(&view);
+         com_ptr<ID3D11Resource> resource;
+         targets[0]->GetResource(&resource);
+         com_ptr<ID3D11Texture2D> target;
+         if (view.ViewDimension != D3D11_RTV_DIMENSION_TEXTURE2D || view.Texture2D.MipSlice != 0 || FAILED(resource->QueryInterface(&target))) return false;
+         D3D11_TEXTURE2D_DESC desc{};
+         target->GetDesc(&desc);
+         if (desc.Format != DXGI_FORMAT_R11G11B10_FLOAT || desc.SampleDesc.Count != 1 || desc.ArraySize != 1) return false;
+         // The main view is the largest target the sprites draw into: a smaller one (a reflection) is left alone.
+         if (drawn_frame == frame && uint64_t(desc.Width) * desc.Height < uint64_t(width) * height) return false;
+         com_ptr<ID3D11DepthStencilState> depth_state;
+         UINT reference = 0;
+         context->OMGetDepthStencilState(&depth_state, &reference);
+         if (depth_state)
+         {
+            D3D11_DEPTH_STENCIL_DESC depth_desc{};
+            depth_state->GetDesc(&depth_desc);
+            if (depth_desc.DepthEnable && depth_desc.DepthWriteMask != D3D11_DEPTH_WRITE_MASK_ZERO) return false;
+         }
+         if (!texture || width != desc.Width || height != desc.Height)
+         {
+            Reset();
+            D3D11_TEXTURE2D_DESC layer{};
+            layer.Width = desc.Width;
+            layer.Height = desc.Height;
+            layer.MipLevels = layer.ArraySize = layer.SampleDesc.Count = 1;
+            layer.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            layer.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+            if (FAILED(device->CreateTexture2D(&layer, nullptr, &texture)) || FAILED(device->CreateRenderTargetView(texture.get(), nullptr, &rtv)) || FAILED(device->CreateShaderResourceView(texture.get(), nullptr, &srv)))
+            {
+               Reset();
+               return false;
+            }
+            width = desc.Width;
+            height = desc.Height;
+         }
+         if (cleared_frame != frame)
+         {
+            const float none[4] = {};
+            context->ClearRenderTargetView(rtv.get(), none);
+            cleared_frame = frame;
+         }
+         draw();
+         ID3D11RenderTargetView* layer_target = rtv.get();
+         context->OMSetRenderTargetsAndUnorderedAccessViews(1, &layer_target, depth.get(), 0, D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr, nullptr);
+         draw();
+         ID3D11RenderTargetView* original[8];
+         for (UINT i = 0; i < 8; ++i)
+            original[i] = targets[i].get();
+         context->OMSetRenderTargetsAndUnorderedAccessViews(8, original, depth.get(), 0, D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr, nullptr);
+         drawn_frame = frame;
+         return true;
+      }
+   };
+} // namespace Battlefront2Sparks
 
 namespace Battlefront2ACES2
 {
