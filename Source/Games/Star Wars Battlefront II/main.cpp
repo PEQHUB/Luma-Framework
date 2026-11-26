@@ -59,6 +59,14 @@ inline constexpr std::array<std::array<uint32_t, 2>, 2> bf2_xegtao_main_keys = {
    {CompileTimeStringHash("Battlefront II VB-GTAO Main Pass CS (Medium)"), CompileTimeStringHash("Battlefront II VB-GTAO Main Pass CS (High)")},
 }};
 inline constexpr uint32_t bf2_xegtao_denoise_key = CompileTimeStringHash("Battlefront II XeGTAO Denoise CS");
+// CORTAO (Luma_SWBF2_CORTAO.hlsl): prepass, main pass per sample count (Battlefront2XeGTAO::cortao_samples), filter.
+inline constexpr uint32_t bf2_cortao_prepass_key = CompileTimeStringHash("Battlefront II CORTAO Prepass CS");
+inline constexpr std::array<uint32_t, 7> bf2_cortao_main_keys = {
+   CompileTimeStringHash("Battlefront II CORTAO Main Pass CS (4)"), CompileTimeStringHash("Battlefront II CORTAO Main Pass CS (6)"),
+   CompileTimeStringHash("Battlefront II CORTAO Main Pass CS (8)"), CompileTimeStringHash("Battlefront II CORTAO Main Pass CS (12)"),
+   CompileTimeStringHash("Battlefront II CORTAO Main Pass CS (16)"), CompileTimeStringHash("Battlefront II CORTAO Main Pass CS (24)"),
+   CompileTimeStringHash("Battlefront II CORTAO Main Pass CS (32)")};
+inline constexpr uint32_t bf2_cortao_filter_key = CompileTimeStringHash("Battlefront II CORTAO Filter CS");
 // The eye glare passes (Luma_SWBF2_Glare.hlsl, BF2_GLARE_PASS 0 to 3).
 inline constexpr std::array<uint32_t, 4> bf2_glare_keys = {
    CompileTimeStringHash("Battlefront II Glare Excess CS"),
@@ -188,9 +196,10 @@ struct Battlefront2GameDeviceData final : public GameDeviceData
    UINT dlss_display_crop_x = 0;
    UINT dlss_display_crop_y = 0;
    uint64_t dlss_logged_feature_key = 0; // Extents of the last logged feature.
-   // The samplers the game bound on the immediate context (stage, slot), before Luma
+   // The samplers the game bound on the immediate context (stage, slot), before OnPushSamplers
    // replaced them with mip-biased variants.
    com_ptr<ID3D11SamplerState> native_mip_samplers[6][D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT];
+   Battlefront2MipBias::Variants mip_variants;
    UINT dlss_last_swapchain_width = 0;
    UINT dlss_last_swapchain_height = 0;
    // Back buffer size measured at each present; output_resolution can lag behind a resize. It sets the DLSS
@@ -1873,30 +1882,58 @@ public:
    }
 #endif
 
-   // Records the samplers the game binds on the immediate context. The framework replaces them
-   // with mip-biased variants in a copy of the update, so this later callback sees the originals.
-   static void OnTrackNativeSamplers(reshade::api::command_list* cmd_list, reshade::api::shader_stage stages,
-      reshade::api::pipeline_layout, uint32_t, const reshade::api::descriptor_table_update& update)
+   // Binds the game's samplers with DLSS's mip bias (Battlefront2MipBias::Adjust) and records the samplers the game
+   // binds on the immediate context, so a bias change can rebind them. ReShade passes the game's own bind array, so the
+   // variants go into a copy of the update.
+   static void OnPushSamplers(reshade::api::command_list* cmd_list, reshade::api::shader_stage stages,
+      reshade::api::pipeline_layout layout, uint32_t layout_param, const reshade::api::descriptor_table_update& update)
    {
-      if (update.type != reshade::api::descriptor_type::sampler) return;
+      if (update.type != reshade::api::descriptor_type::sampler || update.count > D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT) return;
       const auto* cmd_list_data = cmd_list->get_private_data<CommandListData>();
       auto* device_data = cmd_list->get_device()->get_private_data<DeviceData>();
-      if (cmd_list_data == nullptr || !cmd_list_data->is_primary || device_data == nullptr || device_data->game == nullptr) return;
-      auto& native = GetGameDeviceData(*device_data).native_mip_samplers;
-      constexpr reshade::api::shader_stage sampler_stages[] = {
-         reshade::api::shader_stage::vertex, reshade::api::shader_stage::hull,
-         reshade::api::shader_stage::domain, reshade::api::shader_stage::geometry,
-         reshade::api::shader_stage::pixel, reshade::api::shader_stage::compute};
-      for (unsigned stage = 0; stage < 6; ++stage)
+      if (cmd_list_data == nullptr || device_data == nullptr || device_data->game == nullptr) return;
+      auto& game_device_data = GetGameDeviceData(*device_data);
+      const auto* samplers = static_cast<const reshade::api::sampler*>(update.descriptors);
+      if (cmd_list_data->is_primary)
       {
-         if ((stages & sampler_stages[stage]) == 0) continue;
-         for (uint32_t i = 0; i < update.count && update.binding + i < D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT; ++i)
+         auto& native = game_device_data.native_mip_samplers;
+         constexpr reshade::api::shader_stage sampler_stages[] = {
+            reshade::api::shader_stage::vertex, reshade::api::shader_stage::hull,
+            reshade::api::shader_stage::domain, reshade::api::shader_stage::geometry,
+            reshade::api::shader_stage::pixel, reshade::api::shader_stage::compute};
+         for (unsigned stage = 0; stage < 6; ++stage)
          {
-            auto* original = reinterpret_cast<ID3D11SamplerState*>(static_cast<const reshade::api::sampler*>(update.descriptors)[i].handle);
-            if (native[stage][update.binding + i].get() != original)
-               native[stage][update.binding + i] = original;
+            if ((stages & sampler_stages[stage]) == 0) continue;
+            for (uint32_t i = 0; i < update.count && update.binding + i < D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT; ++i)
+            {
+               auto* original = reinterpret_cast<ID3D11SamplerState*>(samplers[i].handle);
+               if (native[stage][update.binding + i].get() != original)
+                  native[stage][update.binding + i] = original;
+            }
          }
       }
+      float bias = 0.f;
+      {
+         const std::shared_lock lock(s_mutex_samplers);
+         bias = device_data->texture_mip_lod_bias_offset;
+      }
+      if (bias == 0.f) return;
+      auto* device = reinterpret_cast<ID3D11Device*>(cmd_list->get_device()->get_native());
+      std::array<reshade::api::sampler, D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT> replaced;
+      bool any_replaced = false;
+      for (uint32_t i = 0; i < update.count; ++i)
+      {
+         replaced[i] = samplers[i];
+         if (auto* variant = game_device_data.mip_variants.Get(device, reinterpret_cast<ID3D11SamplerState*>(samplers[i].handle), bias))
+         {
+            replaced[i].handle = reinterpret_cast<uint64_t>(variant);
+            any_replaced = true;
+         }
+      }
+      if (!any_replaced) return;
+      auto biased = update;
+      biased.descriptors = replaced.data();
+      cmd_list->push_descriptors(stages, layout, layout_param, biased);
    }
 
    // Registered after the framework's own events, so these callbacks run after them.
@@ -1907,7 +1944,7 @@ public:
       reshade::unregister_overlay(NAME, OnRegisterMainOverlay);
       reshade::register_overlay(NAME, OnBattlefront2Overlay);
 #endif
-      reshade::register_event<reshade::addon_event::push_descriptors>(OnTrackNativeSamplers);
+      reshade::register_event<reshade::addon_event::push_descriptors>(OnPushSamplers);
       reshade::register_event<reshade::addon_event::create_swapchain>(OnCreateFlipSwapchain);
       reshade::register_event<reshade::addon_event::create_resource_view>(OnCreateHDRBackbufferView);
       reshade::register_event<reshade::addon_event::map_buffer_region>(OnJitterMapBufferRegion);
@@ -1928,7 +1965,7 @@ public:
 #if !DEVELOPMENT
       reshade::unregister_overlay(NAME, OnBattlefront2Overlay);
 #endif
-      reshade::unregister_event<reshade::addon_event::push_descriptors>(OnTrackNativeSamplers);
+      reshade::unregister_event<reshade::addon_event::push_descriptors>(OnPushSamplers);
       Battlefront2Reflex::Shutdown();
       reshade::unregister_event<reshade::addon_event::create_swapchain>(OnCreateFlipSwapchain);
       reshade::unregister_event<reshade::addon_event::create_resource_view>(OnCreateHDRBackbufferView);
@@ -1986,6 +2023,12 @@ private:
             add_shader(bf2_xegtao_main_keys[method][quality], "Luma_SWBF2_XeGTAO", Stage::compute_shader, "main_pass_cs", {{"VISIBILITY_BITMASK", xegtao_bitmask[method]}, {"XE_GTAO_QUALITY", xegtao_quality[quality]}});
       }
       add_shader(bf2_xegtao_denoise_key, "Luma_SWBF2_XeGTAO", Stage::compute_shader, "denoise_pass_cs", {{"XE_GTAO_FINAL_APPLY", "1"}});
+      constexpr std::array<const char*, 7> cortao_sample_count = {"4", "6", "8", "12", "16", "24", "32"};
+      static_assert(cortao_sample_count.size() == Battlefront2XeGTAO::cortao_samples.size());
+      add_shader(bf2_cortao_prepass_key, "Luma_SWBF2_CORTAO", Stage::compute_shader, "main", {{"CORTAO_PASS", "0"}});
+      for (size_t level = 0; level < cortao_sample_count.size(); ++level)
+         add_shader(bf2_cortao_main_keys[level], "Luma_SWBF2_CORTAO", Stage::compute_shader, "main", {{"CORTAO_PASS", "1"}, {"CORTAO_SAMPLE_COUNT", cortao_sample_count[level]}});
+      add_shader(bf2_cortao_filter_key, "Luma_SWBF2_CORTAO", Stage::compute_shader, "main", {{"CORTAO_PASS", "2"}});
       constexpr std::array<const char*, 4> glare_pass = {"0", "1", "2", "3"};
       for (size_t pass = 0; pass < glare_pass.size(); ++pass)
          add_shader(bf2_glare_keys[pass], "Luma_SWBF2_Glare", Stage::compute_shader, "main", {{"BF2_GLARE_PASS", glare_pass[pass]}});
@@ -2393,9 +2436,11 @@ private:
                };
                const size_t method = ao_settings.visibility_bitmask ? 1 : 0;
                const size_t quality = (std::min)(ao_settings.quality, 1u);
-               const Battlefront2XeGTAO::State::Kernels kernels{
-                  find_kernel(bf2_xegtao_prefilter_keys[method]), find_kernel(bf2_xegtao_main_keys[method][quality]), find_kernel(bf2_xegtao_denoise_key)};
-               // XeGTAO rewrites the whole R8 AO target; the game's two blur passes still run after it.
+               const size_t cortao_level = (std::min)(size_t(ao_settings.cortao_level), bf2_cortao_main_keys.size() - 1);
+               const Battlefront2XeGTAO::State::Kernels kernels = ao_settings.cortao
+                                                                     ? Battlefront2XeGTAO::State::Kernels{true, find_kernel(bf2_cortao_prepass_key), find_kernel(bf2_cortao_main_keys[cortao_level]), find_kernel(bf2_cortao_filter_key)}
+                                                                     : Battlefront2XeGTAO::State::Kernels{false, find_kernel(bf2_xegtao_prefilter_keys[method]), find_kernel(bf2_xegtao_main_keys[method][quality]), find_kernel(bf2_xegtao_denoise_key)};
+               // XeGTAO or CORTAO rewrites the whole R8 AO target; the game's two blur passes still run after it.
                game_device_data.xegtao.Dispatch(native_device_context, cb_luma_global_settings.FrameIndex, kernels, [&]
                   { (*original_draw_dispatch_func)(); });
             }
@@ -3520,7 +3565,7 @@ private:
          device_data.sr_suppressed = false;
          device_data.has_drawn_sr = false;
       }
-      if (enable_samplers_upgrade && !custom_texture_mip_lod_bias_offset)
+      if (!custom_texture_mip_lod_bias_offset)
       {
          const bool dlss_scene_consumed = game_device_data.dlss_output_consumed_frame == cb_luma_global_settings.FrameIndex && game_device_data.dlss_last_effective_input_height > 0 && game_device_data.dlss_last_target_height > 0;
          // The bias follows the measured NGX input (aligned sizes included); native frames get no bias.
@@ -3535,7 +3580,7 @@ private:
             device_data.texture_mip_lod_bias_offset = new_mip_bias;
          }
          if (std::abs(previous_mip_bias - new_mip_bias) > 0.001f)
-            RefreshMipBiasSamplers(native_device, device_data, game_device_data.native_mip_samplers);
+            RefreshMipBiasSamplers(native_device, device_data.primary_command_list.get(), game_device_data.mip_variants, new_mip_bias, game_device_data.native_mip_samplers);
       }
 
       // The largest back buffer gives the display size; output_resolution can lag behind a resize.
@@ -3646,6 +3691,7 @@ private:
                   "\nImGui"
                   "\nRenoDX and PsychoV (ShortFuse)"
                   "\nXeGTAO (Intel)"
+                  "\nCORTAO (Daniel Isheden)"
                   "\nGT7 Tone Mapping (Polyphony Digital)"
                   "\nACES"
                   "\nNVIDIA DLSS");
@@ -3665,14 +3711,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
          "STAR WARS Battlefront II (2017) Luma mod", "", mod_version);
       Globals::DEVELOPMENT_STATE = Globals::ModDevelopmentState::Finished;
 
-      // Preserve native formats while enabling Luma's independent-flip and
-      // DLSS texture-detail paths.
+      // Preserve native formats while enabling Luma's independent-flip path. The game's samplers get DLSS's mip bias
+      // from OnPushSamplers (samplers.h), not from Luma's generic sampler upgrade, which also changed shadow samplers.
       swapchain_format_upgrade_type = TextureFormatUpgradesType::None;
       swapchain_upgrade_type = SwapchainUpgradeType::None;
       texture_format_upgrades_type = TextureFormatUpgradesType::None;
       texture_upgrade_formats.clear();
-      enable_samplers_upgrade = true;
-      upgrade_comparison_samplers = false; // Shadow and depth comparison samplers keep the game's state.
 
 #if ALLOW_SHADERS_DUMPING
       auto_dump = false; // Only the shader cache is needed, not dumps on disk.

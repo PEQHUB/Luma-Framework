@@ -5,6 +5,8 @@ ReShade: Copyright 2014 Patrick Mours.
 RenoDX / PsychoV (Psycho Test35): Copyright (c) 2025 Carlos Lopez Jr.; Psycho code Copyright (C) 2026 Carlos Lopez. MIT.
 Renobot (the BT.2020 PQ ICC profile of HDR screenshots): Copyright (c) 2026 Carlos Lopez Jr. MIT.
 XeGTAO: Copyright (C) 2016-2021 Intel Corporation, MIT; used through Luma's shared Luma/Includes/XeGTAO.hlsl.
+CORTAO (reference implementation v1.0.3, https://github.com/theagentd/CORTAO): Copyright (c) 2026 Daniel Isheden, MIT.
+  Unmodified in Luma/Star Wars Battlefront II/Includes/CORTAO; its occluder lookup table generator is ported to C++ in the addon.
 GT7 tone mapping: Copyright (c) 2025 Polyphony Digital Inc., MIT. Ported to HLSL for Luma (Luma/Star Wars Battlefront II/Includes/GT7).
 ACES 2.0 Output Transform: Copyright Contributors to the ACES Project, Apache License 2.0.
   Modified (ported to HLSL and C++) for Luma; see Luma/Star Wars Battlefront II/Includes/ACES2 and the addon.
@@ -1576,6 +1578,31 @@ XeGTAO.txt
 MIT License
 
 Copyright (C) 2016-2021, Intel Corporation 
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+CORTAO.txt
+
+MIT License
+
+Copyright (c) 2026 Daniel Isheden
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

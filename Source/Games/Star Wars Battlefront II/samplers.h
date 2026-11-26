@@ -1,25 +1,104 @@
 #pragma once
-// Texture LOD bias for the game's samplers at the DLSS render resolution.
+// DLSS's texture LOD bias on the game's material samplers.
 
 #include <d3d11.h>
 #include <algorithm>
 #include <cmath>
+#include <mutex>
+#include <shared_mutex>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace Battlefront2MipBias
 {
    inline float Offset(unsigned int render_width, unsigned int output_width, bool active)
    {
       if (!active || render_width == 0 || output_width == 0) return 0.f;
-      // NVIDIA DLSS guide, section 3.5. Luma's sampler upgrade adds it to the
-      // native sampler bias, exactly once. DLAA retains the -1 temporal detail bias.
+      // NVIDIA DLSS guide, section 3.5. Adjust adds it to the native sampler bias, exactly once. DLAA retains the -1
+      // temporal detail bias.
       return std::log2(float(render_width) / float((std::max)(render_width, output_width))) - 1.f;
    }
+
+   // Gives a game sampler DLSS's bias and 16x AF, or returns false to keep it as the game made it. Only the anisotropic
+   // material samplers with a mip range change. Shadow, point, linear post-process and fixed-mip samplers stay native:
+   // the soft shadow pass reads its shadow map through an ordinary (non-comparison) sampler, so Luma's generic upgrade
+   // changed the shadows. Nothing changes without DLSS.
+   inline bool Adjust(D3D11_SAMPLER_DESC& desc, float offset)
+   {
+      if (offset == 0.f || desc.Filter != D3D11_FILTER_ANISOTROPIC || desc.MaxLOD <= desc.MinLOD) return false;
+      desc.MaxAnisotropy = D3D11_REQ_MAXANISOTROPY;
+      desc.MipLODBias = (std::clamp)(desc.MipLODBias + offset, D3D11_MIP_LOD_BIAS_MIN, D3D11_MIP_LOD_BIAS_MAX);
+      return true;
+   }
+
+   // The variants of the game's samplers, one per bias. Nothing is released before the device goes, so a pointer handed
+   // out stays valid while another thread binds it, and an entry holds the game's sampler, so its address is never reused.
+   class Variants
+   {
+      struct Entry
+      {
+         com_ptr<ID3D11SamplerState> native;
+         std::vector<std::pair<float, com_ptr<ID3D11SamplerState>>> by_bias;
+         ID3D11SamplerState* Find(float bias, bool& found) const
+         {
+            for (const auto& [b, variant] : by_bias)
+               if (b == bias)
+               {
+                  found = true;
+                  return variant.get();
+               }
+            found = false;
+            return nullptr;
+         }
+      };
+      std::shared_mutex mutex_;
+      std::unordered_map<ID3D11SamplerState*, Entry> entries_;
+
+   public:
+      // What to bind instead of `native` at this bias, or null to keep the game's sampler.
+      ID3D11SamplerState* Get(ID3D11Device* device, ID3D11SamplerState* native, float bias)
+      {
+         if (!native || bias == 0.f) return nullptr;
+         bool found = false;
+         {
+            const std::shared_lock lock(mutex_);
+            const auto entry = entries_.find(native);
+            if (entry != entries_.end())
+            {
+               auto* variant = entry->second.Find(bias, found);
+               if (found) return variant;
+            }
+         }
+         D3D11_SAMPLER_DESC desc{};
+         native->GetDesc(&desc);
+         com_ptr<ID3D11SamplerState> variant;
+         if (Adjust(desc, bias) && FAILED(device->CreateSamplerState(&desc, &variant))) variant = nullptr;
+         const std::unique_lock lock(mutex_);
+         auto& entry = entries_[native];
+         auto* existing = entry.Find(bias, found);
+         if (found) return existing; // Another thread made it first.
+         entry.native = native;
+         entry.by_bias.emplace_back(bias, variant);
+         return variant.get();
+      }
+      // Whether `bound` is one of the variants of `native`.
+      bool Owns(ID3D11SamplerState* native, ID3D11SamplerState* bound)
+      {
+         const std::shared_lock lock(mutex_);
+         const auto entry = entries_.find(native);
+         if (entry == entries_.end()) return false;
+         for (const auto& [bias, variant] : entry->second.by_bias)
+            if (variant.get() == bound) return true;
+         return false;
+      }
+   };
 } // namespace Battlefront2MipBias
 
 // Rebinds the game's samplers with the current mip bias. Called only when the bias changes, on the immediate render
 // thread. Native D3D calls bypass the add-on's events, so the tracked original binds stay as they are.
 // "native" holds the samplers the game bound on the immediate context, by stage and slot.
-inline void RefreshMipBiasSamplers(ID3D11Device* device, DeviceData& data,
+inline void RefreshMipBiasSamplers(ID3D11Device* device, ID3D11DeviceContext* context, Battlefront2MipBias::Variants& variants, float bias,
    const com_ptr<ID3D11SamplerState> (&native)[6][D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT])
 {
    using GetSamplers = void (STDMETHODCALLTYPE ID3D11DeviceContext::*)(UINT, UINT, ID3D11SamplerState**);
@@ -28,7 +107,6 @@ inline void RefreshMipBiasSamplers(ID3D11Device* device, DeviceData& data,
       &ID3D11DeviceContext::GSGetSamplers, &ID3D11DeviceContext::PSGetSamplers, &ID3D11DeviceContext::CSGetSamplers};
    static const SetSamplers set[6] = {&ID3D11DeviceContext::VSSetSamplers, &ID3D11DeviceContext::HSSetSamplers, &ID3D11DeviceContext::DSSetSamplers,
       &ID3D11DeviceContext::GSSetSamplers, &ID3D11DeviceContext::PSSetSamplers, &ID3D11DeviceContext::CSSetSamplers};
-   auto* context = data.primary_command_list.get();
    if (!context) return;
    for (unsigned stage = 0; stage < 6; ++stage)
    {
@@ -37,32 +115,17 @@ inline void RefreshMipBiasSamplers(ID3D11Device* device, DeviceData& data,
       ID3D11SamplerState* next[16]{};
       std::copy(std::begin(bound), std::end(bound), std::begin(next));
       bool changed = false;
+      for (unsigned slot = 0; slot < 16; ++slot)
       {
-         std::unique_lock lock(s_mutex_samplers);
-         for (unsigned slot = 0; slot < 16; ++slot)
-         {
-            auto* original = native[stage][slot].get();
-            if (!original || !bound[slot]) continue;
-            auto found = data.custom_sampler_by_original_sampler.find(reinterpret_cast<uint64_t>(original));
-            if (found == data.custom_sampler_by_original_sampler.end()) continue;
-            auto& variants = found->second;
-            bool owned = bound[slot] == original;
-            for (const auto& [bias, sampler] : variants)
-               owned |= sampler.get() == bound[slot];
-            // Something else (a framework or private pass) bound this slot: keep it.
-            if (!owned) continue;
-            auto current = variants.find(data.texture_mip_lod_bias_offset);
-            if (current == variants.end())
-            {
-               D3D11_SAMPLER_DESC desc{};
-               original->GetDesc(&desc);
-               current = variants.emplace(data.texture_mip_lod_bias_offset, CreateCustomSampler(data, device, desc)).first;
-            }
-            next[slot] = current->second ? current->second.get() : original;
-            changed |= next[slot] != bound[slot];
-         }
-         if (changed) (context->*set[stage])(0, 16, next);
+         auto* original = native[stage][slot].get();
+         if (!original || !bound[slot]) continue;
+         // Something else (a framework or private pass) bound this slot: keep it.
+         if (bound[slot] != original && !variants.Owns(original, bound[slot])) continue;
+         auto* variant = variants.Get(device, original, bias);
+         next[slot] = variant ? variant : original;
+         changed |= next[slot] != bound[slot];
       }
+      if (changed) (context->*set[stage])(0, 16, next);
       for (auto* sampler : bound)
          if (sampler) sampler->Release();
    }

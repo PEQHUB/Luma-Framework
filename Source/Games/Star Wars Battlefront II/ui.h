@@ -970,71 +970,92 @@ namespace Battlefront2XeGTAO
    inline std::mutex settings_mutex;
    struct Settings
    {
-      bool enabled = true;            // XeGTAO or VB-GTAO replaces the game's AO
-      bool visibility_bitmask = true; // VB-GTAO
+      bool enabled = true;             // XeGTAO, VB-GTAO or CORTAO replaces the game's AO
+      bool visibility_bitmask = false; // VB-GTAO
+      bool cortao = true;              // CORTAO
       float radius = 1.f;
       unsigned quality = 1;
+      unsigned cortao_level = cortao_default_level; // Index into cortao_samples
+      bool cortao_temporal_noise = true;
    };
-   // "BattlefrontIIAOMethod": 0 Native, 1 XeGTAO, 3 VB-GTAO. 2 was a Luma "Off", which now loads as Native: the game's
-   // own Ambient Occlusion setting turns AO off.
+   // "BattlefrontIIAOMethod": 0 Native, 1 XeGTAO, 3 VB-GTAO, 4 CORTAO. 2 was a Luma "Off", which now loads as Native:
+   // the game's own Ambient Occlusion setting turns AO off.
    inline int Method(const Settings& s)
    {
-      return !s.enabled ? 0 : s.visibility_bitmask ? 3
-                                                   : 1;
+      return !s.enabled ? 0 : s.cortao            ? 4
+                           : s.visibility_bitmask ? 3
+                                                  : 1;
    }
    inline Settings Snapshot()
    {
       std::lock_guard lock(settings_mutex);
-      return {enabled.load(), visibility_bitmask.load(), radius_scale.load(), quality.load()};
+      return {enabled.load(), visibility_bitmask.load(), cortao.load(), radius_scale.load(), quality.load(), cortao_level.load(), cortao_temporal_noise.load()};
    }
    inline void Store(const Settings& s)
    {
       std::lock_guard lock(settings_mutex);
       enabled = s.enabled;
       visibility_bitmask = s.visibility_bitmask;
+      cortao = s.cortao;
       radius_scale = s.radius;
       quality = s.quality;
+      cortao_level = s.cortao_level;
+      cortao_temporal_noise = s.cortao_temporal_noise;
    }
-   // Radius and quality are config-only.
+   inline void Save(const Settings& s)
+   {
+      reshade::set_config_value(nullptr, NAME, "BattlefrontIIXeGTAOEnabled", s.enabled);
+      reshade::set_config_value(nullptr, NAME, "BattlefrontIIAOMethod", Method(s));
+      reshade::set_config_value(nullptr, NAME, "BattlefrontIIXeGTAORadiusScale", s.radius);
+      reshade::set_config_value(nullptr, NAME, "BattlefrontIIXeGTAOQuality", s.quality);
+      reshade::set_config_value(nullptr, NAME, "BattlefrontIICORTAOSamples", cortao_samples[s.cortao_level]);
+      reshade::set_config_value(nullptr, NAME, "BattlefrontIICORTAOTemporalNoise", s.cortao_temporal_noise);
+   }
+   // Radius, quality and CORTAO's samples and noise are config-only.
    inline void Load()
    {
       Settings s;
       const bool saved = reshade::get_config_value(nullptr, NAME, "BattlefrontIIXeGTAOEnabled", s.enabled);
-      int method = saved ? (s.enabled ? 1 : 0) : 3;
+      int method = saved ? (s.enabled ? 1 : 0) : 4;
       reshade::get_config_value(nullptr, NAME, "BattlefrontIIAOMethod", method);
-      if (method >= 0 && method <= 3)
+      if (method >= 0 && method <= 4)
       {
-         s.enabled = method == 1 || method == 3;
+         s.enabled = method == 1 || method == 3 || method == 4;
          s.visibility_bitmask = method == 3;
+         s.cortao = method == 4;
       }
       reshade::get_config_value(nullptr, NAME, "BattlefrontIIXeGTAORadiusScale", s.radius);
       reshade::get_config_value(nullptr, NAME, "BattlefrontIIXeGTAOQuality", s.quality);
+      unsigned samples = cortao_samples[cortao_default_level];
+      reshade::get_config_value(nullptr, NAME, "BattlefrontIICORTAOSamples", samples);
+      reshade::get_config_value(nullptr, NAME, "BattlefrontIICORTAOTemporalNoise", s.cortao_temporal_noise);
       // An invalid value resets only itself, never the saved method.
       if (!std::isfinite(s.radius) || s.radius < .5f || s.radius > 2.f) s.radius = 1;
       if (s.quality > 1) s.quality = 1;
+      for (unsigned i = 0; i < cortao_samples.size(); ++i)
+         if (cortao_samples[i] == samples) s.cortao_level = i;
       Store(s);
    }
    inline void DrawControl()
    {
       auto s = Snapshot();
-      // Menu order: Native, XeGTAO, VB-GTAO.
-      int selected = !s.enabled ? 0 : s.visibility_bitmask ? 2
-                                                           : 1;
+      // Menu order: Native, XeGTAO, VB-GTAO, CORTAO.
+      int selected = !s.enabled ? 0 : s.cortao            ? 3
+                                   : s.visibility_bitmask ? 2
+                                                          : 1;
       Battlefront2UI::Row("Ambient occlusion");
-      bool changed = Battlefront2UI::Combo("##ao", &selected, "Native\0XeGTAO\0VB-GTAO\0");
+      bool changed = Battlefront2UI::Combo("##ao", &selected, "Native\0XeGTAO\0VB-GTAO\0CORTAO\0");
       Battlefront2UI::Hint("Shading in corners and where objects meet. The game's own Ambient Occlusion setting turns it off.");
-      if (Battlefront2UI::ResetItem(selected == 2, false))
+      if (Battlefront2UI::ResetItem(selected == 3, false))
       {
-         selected = 2;
+         selected = 3;
          changed = true;
       }
       if (!changed) return;
       s.enabled = selected != 0;
       s.visibility_bitmask = selected == 2;
+      s.cortao = selected == 3;
       Store(s);
-      reshade::set_config_value(nullptr, NAME, "BattlefrontIIXeGTAOEnabled", s.enabled);
-      reshade::set_config_value(nullptr, NAME, "BattlefrontIIAOMethod", Method(s));
-      reshade::set_config_value(nullptr, NAME, "BattlefrontIIXeGTAORadiusScale", s.radius);
-      reshade::set_config_value(nullptr, NAME, "BattlefrontIIXeGTAOQuality", s.quality);
+      Save(s);
    }
 } // namespace Battlefront2XeGTAO
